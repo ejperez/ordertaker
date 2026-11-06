@@ -1,15 +1,28 @@
 import cors from '@fastify/cors';
 import Fastify from 'fastify';
+import { adminCatalogRoutes } from './routes/admin-catalog.js';
+import { adminAuthRoutes } from './routes/admin-auth.js';
+import { catalogRoutes } from './routes/catalog.js';
 import { env } from './config/env.js';
+import { prisma } from './db.js';
 import { healthRoutes } from './routes/health.js';
+import { registerStaticFiles } from './static-files.js';
 
 export async function buildApp() {
   const app = Fastify({ logger: true });
+  app.decorateRequest('owner', null);
+  app.addHook('onClose', async () => prisma.$disconnect());
 
   await app.register(cors, {
     origin: env.FRONTEND_ORIGIN,
+    credentials: true,
+    methods: ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
   });
+  await registerStaticFiles(app);
   await app.register(healthRoutes, { prefix: '/api' });
+  await app.register(adminAuthRoutes, { prefix: '/api/admin' });
+  await app.register(adminCatalogRoutes, { prefix: '/api/admin' });
+  await app.register(catalogRoutes, { prefix: '/api' });
 
   app.setErrorHandler((error, request, reply) => {
     request.log.error(error);

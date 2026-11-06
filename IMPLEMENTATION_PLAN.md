@@ -881,32 +881,32 @@ generate the entire application in one pass.
 
 ### Phase 1 --- Project foundation
 
--   [ ] Create frontend and backend projects.
--   [ ] Configure TypeScript, linting, formatting, and environment
+-   [x] Create frontend and backend projects.
+-   [x] Configure TypeScript, linting, formatting, and environment
     variables.
--   [ ] Set up PostgreSQL and Prisma.
--   [ ] Create the initial Prisma schema and migration.
--   [ ] Add seed scripts for the owner, categories, products, and store
+-   [x] Set up PostgreSQL and Prisma.
+-   [x] Create the initial Prisma schema and migration.
+-   [x] Add seed scripts for the owner, categories, products, and store
     settings.
--   [ ] Set up Fastify plugins, centralized error handling, and health
+-   [x] Set up Fastify plugins, centralized error handling, and health
     check.
--   [ ] Set up React Router, Tailwind, and TanStack Query.
--   [ ] Confirm frontend can call the backend locally.
+-   [x] Set up React Router, Tailwind, and TanStack Query.
+-   [x] Confirm frontend can call the backend locally.
 
 **Done when:** both apps run locally, the database migrates and seeds
 successfully, and the frontend can fetch a test endpoint.
 
 ### Phase 2 --- Admin authentication and product management
 
--   [ ] Implement owner login, logout, and current-session endpoint.
--   [ ] Add secure cookie/session handling and login rate limiting.
--   [ ] Protect admin routes on the backend.
--   [ ] Implement category CRUD.
--   [ ] Implement product CRUD and archive/availability behavior.
--   [ ] Implement local product image upload and authorized image
+-   [x] Implement owner login, logout, and current-session endpoint.
+-   [x] Add secure cookie/session handling and login rate limiting.
+-   [x] Protect admin routes on the backend.
+-   [x] Implement category CRUD.
+-   [x] Implement product CRUD and archive/availability behavior.
+-   [x] Implement local product image upload and authorized image
     serving.
--   [ ] Build the admin product/category screens.
--   [ ] Build the public product catalog endpoint and storefront.
+-   [x] Build the admin product/category screens.
+-   [x] Build the public product catalog endpoint and storefront.
 
 **Done when:** the owner can sign in and manage products, and customers
 can browse active products.

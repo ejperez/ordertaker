@@ -1,6 +1,6 @@
 # Neighborhood Food Ordering
 
-Phase 1 foundation for a small, single-location food ordering application.
+Phase 2 implementation for a small, single-location food ordering application.
 
 ## Requirements
 
@@ -44,9 +44,22 @@ configuration for a production PostgreSQL instance and provide production
 environment variables through the server's environment rather than committing
 credentials.
 
-The storefront runs at <http://localhost:5173>. Its home page checks the API at
-<http://localhost:3000/api/health>. `npm run build`, `npm run lint`, and
-`npm run format:check` provide local quality checks.
+The storefront runs at <http://localhost:5173>; the public menu is at `/` and
+the owner dashboard is at `/admin`. The API health check is available at
+<http://localhost:3000/api/health>. The owner dashboard supports category and
+product management, including availability, archive/restore, and product image
+uploads. Product image files are stored under
+`backend/public/uploads/products/`; the API validates the decoded file signature
+and limits images to 5 MB. Fastify Static serves files from
+`backend/public/uploads/` at `/uploads/`.
+
+Admin sessions use random opaque tokens stored as hashes in the database, with
+12-hour expiry. The HTTP-only cookie is `SameSite=Lax`, uses `Secure` in
+production, and admin write requests must originate from `FRONTEND_ORIGIN`.
+Login is limited to five attempts per client IP per 15-minute window.
+
+`npm run build`, `npm run lint`, and `npm run format:check` provide local
+quality checks.
 
 The seed command requires `OWNER_NAME`, `OWNER_EMAIL`, and `OWNER_PASSWORD` in
 `.env`. No owner credentials are committed to the project. Seed data can be run
