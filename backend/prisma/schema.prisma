@@ -1,0 +1,192 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum UserRole {
+  OWNER
+}
+
+enum FulfillmentType {
+  DELIVERY
+  PICKUP
+}
+
+enum OrderStatus {
+  PENDING
+  IN_KITCHEN
+  OUT_FOR_DELIVERY
+  READY_FOR_PICKUP
+  DELIVERED
+  PICKED_UP
+  CANCELLED
+}
+
+enum PaymentMethod {
+  COD
+  QR
+}
+
+enum PaymentStatus {
+  UNPAID
+  AWAITING_VERIFICATION
+  PAID
+  REJECTED
+  REFUNDED
+}
+
+enum MessageSenderType {
+  CUSTOMER
+  OWNER
+}
+
+model User {
+  id                   String               @id @default(cuid())
+  name                 String
+  email                String               @unique
+  passwordHash         String               @map("password_hash")
+  role                 UserRole             @default(OWNER)
+  verifiedPayments     Payment[]            @relation("PaymentVerifier")
+  changedOrderStatuses OrderStatusHistory[] @relation("StatusChangedBy")
+  createdAt            DateTime             @default(now()) @map("created_at")
+  updatedAt            DateTime             @updatedAt @map("updated_at")
+
+  @@map("users")
+}
+
+model Category {
+  id        String    @id @default(cuid())
+  name      String    @unique
+  slug      String    @unique
+  sortOrder Int       @default(0) @map("sort_order")
+  isActive  Boolean   @default(true) @map("is_active")
+  products  Product[]
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+
+  @@map("categories")
+}
+
+model Product {
+  id          String      @id @default(cuid())
+  categoryId  String      @map("category_id")
+  category    Category    @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+  name        String
+  slug        String      @unique
+  description String?
+  price       Decimal     @db.Decimal(10, 2)
+  imagePath   String?     @map("image_path")
+  isAvailable Boolean     @default(true) @map("is_available")
+  isArchived  Boolean     @default(false) @map("is_archived")
+  orderItems  OrderItem[]
+  createdAt   DateTime    @default(now()) @map("created_at")
+  updatedAt   DateTime    @updatedAt @map("updated_at")
+
+  @@index([categoryId, isAvailable, isArchived])
+  @@map("products")
+}
+
+model Order {
+  id                   String               @id @default(cuid())
+  orderNumber          String               @unique @map("order_number")
+  customerName         String               @map("customer_name")
+  customerPhone        String               @map("customer_phone")
+  fulfillmentType      FulfillmentType      @map("fulfillment_type")
+  block                String?
+  lot                  String?
+  street               String?
+  deliveryInstructions String?              @map("delivery_instructions")
+  status               OrderStatus          @default(PENDING)
+  paymentMethod        PaymentMethod        @map("payment_method")
+  subtotal             Decimal              @db.Decimal(10, 2)
+  deliveryFee          Decimal              @default(0) @map("delivery_fee") @db.Decimal(10, 2)
+  total                Decimal              @db.Decimal(10, 2)
+  trackingTokenHash    String               @unique @map("tracking_token_hash")
+  items                OrderItem[]
+  payment              Payment?
+  statusHistory        OrderStatusHistory[]
+  messages             Message[]
+  createdAt            DateTime             @default(now()) @map("created_at")
+  updatedAt            DateTime             @updatedAt @map("updated_at")
+
+  @@index([status, createdAt])
+  @@index([fulfillmentType, createdAt])
+  @@map("orders")
+}
+
+model OrderItem {
+  id          String   @id @default(cuid())
+  orderId     String   @map("order_id")
+  order       Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  productId   String?  @map("product_id")
+  product     Product? @relation(fields: [productId], references: [id], onDelete: SetNull)
+  productName String   @map("product_name")
+  quantity    Int
+  unitPrice   Decimal  @map("unit_price") @db.Decimal(10, 2)
+  lineTotal   Decimal  @map("line_total") @db.Decimal(10, 2)
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  @@index([orderId])
+  @@index([productId])
+  @@map("order_items")
+}
+
+model Payment {
+  id                String        @id @default(cuid())
+  orderId           String        @unique @map("order_id")
+  order             Order         @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  method            PaymentMethod
+  status            PaymentStatus @default(UNPAID)
+  amount            Decimal       @db.Decimal(10, 2)
+  referenceNumber   String?       @map("reference_number")
+  proofImagePath    String?       @map("proof_image_path")
+  providerReference String?       @map("provider_reference")
+  verifiedAt        DateTime?     @map("verified_at")
+  verifiedById      String?       @map("verified_by")
+  verifiedBy        User?         @relation("PaymentVerifier", fields: [verifiedById], references: [id], onDelete: SetNull)
+  rejectionReason   String?       @map("rejection_reason")
+  createdAt         DateTime      @default(now()) @map("created_at")
+  updatedAt         DateTime      @updatedAt @map("updated_at")
+
+  @@index([status, createdAt])
+  @@map("payments")
+}
+
+model OrderStatusHistory {
+  id              String       @id @default(cuid())
+  orderId         String       @map("order_id")
+  order           Order        @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  oldStatus       OrderStatus? @map("old_status")
+  newStatus       OrderStatus  @map("new_status")
+  changedByUserId String?      @map("changed_by_user_id")
+  changedBy       User?        @relation("StatusChangedBy", fields: [changedByUserId], references: [id], onDelete: SetNull)
+  note            String?
+  createdAt       DateTime     @default(now()) @map("created_at")
+
+  @@index([orderId, createdAt])
+  @@map("order_status_histories")
+}
+
+model Message {
+  id         String            @id @default(cuid())
+  orderId    String            @map("order_id")
+  order      Order             @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  senderType MessageSenderType @map("sender_type")
+  senderName String            @map("sender_name")
+  message    String
+  createdAt  DateTime          @default(now()) @map("created_at")
+
+  @@index([orderId, createdAt])
+  @@map("messages")
+}
+
+model StoreSetting {
+  key       String   @id
+  value     Json
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@map("store_settings")
+}
