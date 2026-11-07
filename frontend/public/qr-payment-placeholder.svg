@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 280 330" role="img" aria-labelledby="title description">
+  <title id="title">QR payment placeholder</title>
+  <desc id="description">A demonstration QR-style image. It is not a payment code.</desc>
+  <rect width="280" height="330" rx="18" fill="#fff"/>
+  <rect x="20" y="20" width="240" height="240" rx="8" fill="#fff" stroke="#e7e5e4" stroke-width="2"/>
+  <g fill="#14532d">
+    <path d="M36 36h64v64H36zm12 12v40h40V48zm10 10h20v20H58z"/>
+    <path d="M180 36h64v64h-64zm12 12v40h40V48zm10 10h20v20h-20z"/>
+    <path d="M36 180h64v64H36zm12 12v40h40v-40zm10 10h20v20H58z"/>
+    <path d="M116 36h12v12h-12zm24 0h12v12h-12zm-24 24h12v12h-12zm24 12h12v12h-12zm-24 24h12v12h-12zm24 0h12v12h-12zm24-48h12v12h-12zm-36 36h12v12h-12zm-36 36h12v12h-12zm24 0h12v12h-12zm24 0h12v12h-12zm24 0h12v12h-12zm36 0h12v12h-12zm-96 24h12v12h-12zm24 0h12v12h-12zm48 0h12v12h-12zm24 0h12v12h-12zm36 0h12v12h-12z"/>
+    <path d="M108 132h12v12h-12zm24 0h12v12h-12zm24 0h12v12h-12zm48 0h12v12h-12zm-84 24h12v12h-12zm24 0h12v12h-12zm24 0h12v12h-12zm48 0h12v12h-12zm-96 24h12v12h-12zm24 0h12v12h-12zm24 0h12v12h-12zm24 0h12v12h-12zm36 0h12v12h-12zm-84 24h12v12h-12zm36 0h12v12h-12zm24 0h12v12h-12zm24 0h12v12h-12zm-84 24h12v12h-12zm24 0h12v12h-12zm48 0h12v12h-12z"/>
+  </g>
+  <text x="140" y="286" text-anchor="middle" fill="#14532d" font-family="system-ui, sans-serif" font-size="15" font-weight="700">DEMO ONLY</text>
+  <text x="140" y="308" text-anchor="middle" fill="#57534e" font-family="system-ui, sans-serif" font-size="11">Not a payment code</text>
+</svg>

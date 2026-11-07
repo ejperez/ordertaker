@@ -118,6 +118,7 @@ model Order {
   deliveryFee          Decimal              @default(0) @map("delivery_fee") @db.Decimal(10, 2)
   total                Decimal              @db.Decimal(10, 2)
   trackingTokenHash    String               @unique @map("tracking_token_hash")
+  idempotencyKeyHash   String?              @unique @map("idempotency_key_hash")
   items                OrderItem[]
   payment              Payment?
   statusHistory        OrderStatusHistory[]

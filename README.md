@@ -1,6 +1,6 @@
-# Neighborhood Food Ordering
+# Ordertaker
 
-Phase 2 implementation for a small, single-location food ordering application.
+Phase 3 implementation for a small, single-location food ordering application.
 
 ## Requirements
 
@@ -45,7 +45,8 @@ environment variables through the server's environment rather than committing
 credentials.
 
 The storefront runs at <http://localhost:5173>; the public menu is at `/` and
-the owner dashboard is at `/admin`. The API health check is available at
+the guest cart and checkout are at `/checkout`. The owner dashboard is at
+`/admin`. The API health check is available at
 <http://localhost:3000/api/health>. The owner dashboard supports category and
 product management, including availability, archive/restore, and product image
 uploads. Product image files are stored under
@@ -57,6 +58,16 @@ Admin sessions use random opaque tokens stored as hashes in the database, with
 12-hour expiry. The HTTP-only cookie is `SameSite=Lax`, uses `Secure` in
 production, and admin write requests must originate from `FRONTEND_ORIGIN`.
 Login is limited to five attempts per client IP per 15-minute window.
+Guest orders are created at `POST /api/orders`; prices and delivery fees are
+recalculated from the database, and product availability is rechecked in a
+serializable transaction. Orders, items, payment records, and initial status
+history are committed together. Checkout uses a UUID `Idempotency-Key`; the
+database stores only its hash, and duplicate requests do not create another
+order. The tracking token is random and only its hash is stored.
+QR checkout requires a JPEG, PNG, or WebP payment-receipt image (up to 5 MB).
+Receipt files are stored under `backend/private/uploads/payment-proofs/`,
+outside the public static-file directory; owner review and authorized proof
+access are planned for the payment-verification phase.
 
 `npm run build`, `npm run lint`, and `npm run format:check` provide local
 quality checks.

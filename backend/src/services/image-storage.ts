@@ -7,6 +7,10 @@ const productsDirectory = resolve(
   dirname(fileURLToPath(import.meta.url)),
   '../../public/uploads/products',
 );
+const paymentProofsDirectory = resolve(
+  dirname(fileURLToPath(import.meta.url)),
+  '../../private/uploads/payment-proofs',
+);
 const maxImageBytes = 5 * 1024 * 1024;
 const storedFilenamePattern =
   /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.(?:jpg|png|webp)$/i;
@@ -35,6 +39,8 @@ export class ImageValidationError extends Error {}
 export interface ImageStorageService {
   saveProductImage(data: string): Promise<string>;
   removeProductImage(imagePath: string | null): Promise<void>;
+  savePaymentProof(data: string): Promise<string>;
+  removePaymentProof(proofPath: string | null): Promise<void>;
 }
 
 function decodeImage(data: string): { bytes: Buffer; extension: string } {
@@ -68,6 +74,23 @@ export class LocalImageStorageService implements ImageStorageService {
       throw new ImageValidationError('Invalid stored image path');
     }
     await unlink(resolve(productsDirectory, filename));
+  }
+
+  async savePaymentProof(data: string): Promise<string> {
+    const image = decodeImage(data);
+    await mkdir(paymentProofsDirectory, { recursive: true });
+    const filename = `${randomUUID()}${image.extension}`;
+    await writeFile(resolve(paymentProofsDirectory, filename), image.bytes, { flag: 'wx' });
+    return `payment-proofs/${filename}`;
+  }
+
+  async removePaymentProof(proofPath: string | null): Promise<void> {
+    if (!proofPath) return;
+    const [directory, filename] = proofPath.split('/');
+    if (directory !== 'payment-proofs' || !filename || !storedFilenamePattern.test(filename)) {
+      throw new ImageValidationError('Invalid stored payment proof path');
+    }
+    await unlink(resolve(paymentProofsDirectory, filename));
   }
 }
 

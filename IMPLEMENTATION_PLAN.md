@@ -1,4 +1,4 @@
-# Implementation Plan --- Neighborhood Food Ordering POC
+# Implementation Plan --- Ordertaker POC
 
 ## 1. Project Overview
 
@@ -913,18 +913,19 @@ can browse active products.
 
 ### Phase 3 --- Cart, guest checkout, and order creation
 
--   [ ] Implement cart state and persistence.
--   [ ] Build checkout with Delivery/Pickup selection.
--   [ ] Conditionally display delivery address fields.
--   [ ] Display pickup address and instructions for pickup orders.
--   [ ] Implement COD and QR payment selection.
--   [ ] Validate checkout data on the backend.
--   [ ] Recalculate product prices and delivery fee on the backend.
--   [ ] Create orders, order items, and initial payment records in a
+-   [x] Implement cart state and persistence.
+-   [x] Build checkout with Delivery/Pickup selection.
+-   [x] Conditionally display delivery address fields.
+-   [x] Display pickup address and instructions for pickup orders.
+-   [x] Implement COD and QR payment selection.
+-   [x] Require and privately store a QR payment receipt during checkout.
+-   [x] Validate checkout data on the backend.
+-   [x] Recalculate product prices and delivery fee on the backend.
+-   [x] Create orders, order items, and initial payment records in a
     transaction.
--   [ ] Generate a secure tracking token and return the tracking URL
+-   [x] Generate a secure tracking token and return the tracking URL
     once.
--   [ ] Add duplicate-submission protection.
+-   [x] Add duplicate-submission protection.
 
 **Done when:** a guest can place both a delivery and a pickup order, and
 the stored order totals and fulfillment details are correct.
@@ -941,13 +942,15 @@ the stored order totals and fulfillment details are correct.
 -   [ ] Add drag-and-drop and a mobile-friendly status control.
 -   [ ] Ensure order cards show the correct fulfillment and payment
     details.
+-   [ ] Add owner controls to upload and replace the store QR payment
+    image.
 
 **Done when:** the owner can process delivery and pickup orders through
 valid workflows, and customers can view their order status securely.
 
 ### Phase 5 --- Payment verification
 
--   [ ] Configure the store QR image and payment instructions.
+-   [ ] Configure store QR payment instructions.
 -   [ ] Implement payment-proof upload with private file access.
 -   [ ] Implement reference-number submission.
 -   [ ] Build the admin payment review screen.
