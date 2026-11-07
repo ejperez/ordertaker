@@ -112,6 +112,62 @@ function unavailableReply(reply: FastifyReply) {
 }
 
 export const orderRoutes: FastifyPluginAsync = async (app) => {
+  app.get<{ Params: { token: string } }>('/orders/track/:token', async (request, reply) => {
+    if (!/^[A-Za-z0-9_-]{43}$/.test(request.params.token)) {
+      return reply.code(404).send({ error: 'Order not found' });
+    }
+
+    const order = await prisma.order.findUnique({
+      where: { trackingTokenHash: hashValue(request.params.token) },
+      select: {
+        orderNumber: true,
+        customerName: true,
+        customerPhone: true,
+        fulfillmentType: true,
+        block: true,
+        lot: true,
+        street: true,
+        deliveryInstructions: true,
+        status: true,
+        paymentMethod: true,
+        subtotal: true,
+        deliveryFee: true,
+        total: true,
+        createdAt: true,
+        items: {
+          select: { productName: true, quantity: true, unitPrice: true, lineTotal: true },
+          orderBy: { createdAt: 'asc' },
+        },
+        payment: { select: { method: true, status: true, amount: true } },
+        statusHistory: {
+          select: { oldStatus: true, newStatus: true, note: true, createdAt: true },
+          orderBy: { createdAt: 'asc' },
+        },
+      },
+    });
+    if (!order) return reply.code(404).send({ error: 'Order not found' });
+
+    const pickupSettings =
+      order.fulfillmentType === 'PICKUP'
+        ? await prisma.storeSetting.findMany({
+            where: { key: { in: ['pickup_address', 'pickup_instructions'] } },
+          })
+        : [];
+    const pickupValues = new Map(pickupSettings.map((setting) => [setting.key, setting.value]));
+
+    return {
+      ...order,
+      pickupAddress:
+        typeof pickupValues.get('pickup_address') === 'string'
+          ? pickupValues.get('pickup_address')
+          : null,
+      pickupInstructions:
+        typeof pickupValues.get('pickup_instructions') === 'string'
+          ? pickupValues.get('pickup_instructions')
+          : null,
+    };
+  });
+
   app.post('/orders', { bodyLimit: 7_200_000 }, async (request, reply) => {
     const retryAfter = consumeOrderAttempt(request);
     if (retryAfter > 0) {

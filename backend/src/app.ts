@@ -3,6 +3,7 @@ import Fastify from 'fastify';
 import { adminCatalogRoutes } from './routes/admin-catalog.js';
 import { adminAuthRoutes } from './routes/admin-auth.js';
 import { catalogRoutes } from './routes/catalog.js';
+import { adminOrderRoutes } from './routes/admin-orders.js';
 import { orderRoutes } from './routes/orders.js';
 import { env } from './config/env.js';
 import { prisma } from './db.js';
@@ -23,6 +24,7 @@ export async function buildApp() {
   await app.register(healthRoutes, { prefix: '/api' });
   await app.register(adminAuthRoutes, { prefix: '/api/admin' });
   await app.register(adminCatalogRoutes, { prefix: '/api/admin' });
+  await app.register(adminOrderRoutes, { prefix: '/api/admin' });
   await app.register(catalogRoutes, { prefix: '/api' });
   await app.register(orderRoutes, { prefix: '/api' });
 

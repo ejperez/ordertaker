@@ -1,7 +1,8 @@
+import { DndContext, useDraggable, useDroppable, type DragEndEvent } from '@dnd-kit/core';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { useEffect, useRef, useState, type FormEvent } from 'react';
-import { Link, Route, Routes } from 'react-router-dom';
-import { apiRequest, apiUrl, jsonBody } from './api';
+import { useEffect, useRef, useState, type CSSProperties, type FormEvent } from 'react';
+import { Link, Route, Routes, useParams } from 'react-router-dom';
+import { apiBlobRequest, apiRequest, apiUrl, jsonBody } from './api';
 
 type Owner = { id: string; name: string; email: string };
 type Category = { id: string; name: string; slug: string; sortOrder: number; isActive: boolean };
@@ -27,6 +28,60 @@ type StoreInfo = {
   qrPaymentImage: string | null;
   qrPaymentInstructions: string;
 };
+type OrderStatus =
+  | 'PENDING'
+  | 'IN_KITCHEN'
+  | 'OUT_FOR_DELIVERY'
+  | 'READY_FOR_PICKUP'
+  | 'DELIVERED'
+  | 'PICKED_UP'
+  | 'CANCELLED';
+type FulfillmentType = 'DELIVERY' | 'PICKUP';
+type PaymentStatus = 'UNPAID' | 'AWAITING_VERIFICATION' | 'PAID' | 'REJECTED' | 'REFUNDED';
+type ManagedOrder = {
+  id: string;
+  orderNumber: string;
+  customerName: string;
+  customerPhone: string;
+  fulfillmentType: FulfillmentType;
+  block: string | null;
+  lot: string | null;
+  street: string | null;
+  deliveryInstructions: string | null;
+  status: OrderStatus;
+  paymentMethod: 'COD' | 'QR';
+  subtotal: string;
+  deliveryFee: string;
+  total: string;
+  createdAt: string;
+  items: Array<{
+    id: string;
+    productName: string;
+    quantity: number;
+    unitPrice: string;
+    lineTotal: string;
+  }>;
+  payment: { method: 'COD' | 'QR'; status: PaymentStatus; amount: string } | null;
+  statusHistory: Array<{
+    id: string;
+    oldStatus: OrderStatus | null;
+    newStatus: OrderStatus;
+    note: string | null;
+    createdAt: string;
+    changedBy: { name: string } | null;
+  }>;
+};
+type TrackedOrder = Omit<ManagedOrder, 'id' | 'items' | 'statusHistory'> & {
+  items: Array<Omit<ManagedOrder['items'][number], 'id'>>;
+  statusHistory: Array<{
+    oldStatus: OrderStatus | null;
+    newStatus: OrderStatus;
+    note: string | null;
+    createdAt: string;
+  }>;
+  pickupAddress: string | null;
+  pickupInstructions: string | null;
+};
 type OrderResult =
   | { duplicate: true; orderNumber: string }
   | {
@@ -45,6 +100,48 @@ type OrderResult =
 
 const cartStorageKey = 'ordertaker-cart-v1';
 const checkoutKeyStorageKey = 'ordertaker-checkout-key-v1';
+const orderStatuses: OrderStatus[] = [
+  'PENDING',
+  'IN_KITCHEN',
+  'OUT_FOR_DELIVERY',
+  'READY_FOR_PICKUP',
+  'DELIVERED',
+  'PICKED_UP',
+  'CANCELLED',
+];
+const orderStatusLabels: Record<OrderStatus, string> = {
+  PENDING: 'Pending',
+  IN_KITCHEN: 'In the kitchen',
+  OUT_FOR_DELIVERY: 'Out for delivery',
+  READY_FOR_PICKUP: 'Ready for pickup',
+  DELIVERED: 'Delivered',
+  PICKED_UP: 'Picked up',
+  CANCELLED: 'Cancelled',
+};
+const paymentStatusLabels: Record<PaymentStatus, string> = {
+  UNPAID: 'Unpaid',
+  AWAITING_VERIFICATION: 'Awaiting verification',
+  PAID: 'Paid',
+  REJECTED: 'Rejected',
+  REFUNDED: 'Refunded',
+};
+
+function nextOrderStatuses(order: Pick<ManagedOrder, 'status' | 'fulfillmentType'>): OrderStatus[] {
+  const transitions: Record<OrderStatus, OrderStatus[]> = {
+    PENDING: ['IN_KITCHEN', 'CANCELLED'],
+    IN_KITCHEN: [
+      ...(order.fulfillmentType === 'DELIVERY' ? ['OUT_FOR_DELIVERY' as const] : []),
+      ...(order.fulfillmentType === 'PICKUP' ? ['READY_FOR_PICKUP' as const] : []),
+      'CANCELLED',
+    ],
+    OUT_FOR_DELIVERY: ['DELIVERED'],
+    READY_FOR_PICKUP: ['PICKED_UP'],
+    DELIVERED: [],
+    PICKED_UP: [],
+    CANCELLED: [],
+  };
+  return transitions[order.status];
+}
 
 function readCart(): CartLine[] {
   try {
@@ -689,14 +786,24 @@ function CheckoutPage({
                   <div className="mt-4 rounded-lg bg-stone-50 p-4 text-sm leading-6 text-stone-700">
                     <img
                       className="mb-3 w-56 max-w-full rounded-lg bg-white object-contain"
-                      src="/qr-payment-placeholder.svg"
-                      alt="Demonstration QR placeholder, not a payment code"
+                      src={
+                        store.data?.qrPaymentImage
+                          ? `${apiUrl}${store.data.qrPaymentImage}`
+                          : '/qr-payment-placeholder.svg'
+                      }
+                      alt={
+                        store.data?.qrPaymentImage
+                          ? 'Store QR payment code'
+                          : 'Demonstration QR placeholder, not a payment code'
+                      }
                     />
-                    <p className="font-semibold text-amber-900">
-                      Demo image only — do not use it to make a payment.
-                    </p>
+                    {!store.data?.qrPaymentImage && (
+                      <p className="font-semibold text-amber-900">
+                        Demo image only — do not use it to make a payment.
+                      </p>
+                    )}
                     {store.data?.qrPaymentInstructions ||
-                      'The store’s payment QR will be configured in a later phase.'}
+                      'The store has not configured QR payment instructions yet.'}
                     <label className="mt-4 block font-medium text-stone-800">
                       Payment receipt (required)
                       <input
@@ -799,19 +906,629 @@ function CheckoutPage({
 }
 
 function TrackingLinkPage() {
-  return (
-    <main className="mx-auto min-h-screen max-w-2xl px-6 py-20">
-      <section className="rounded-2xl border border-stone-200 bg-white p-7">
-        <h1 className="text-2xl font-semibold text-stone-900">Your private tracking link</h1>
-        <p className="mt-3 leading-7 text-stone-600">
-          Keep this link safe. Order status and timeline details will be available here in the next
-          tracking phase.
-        </p>
-        <Link className="mt-5 inline-block font-semibold text-emerald-900 underline" to="/">
+  const { token = '' } = useParams();
+  const order = useQuery({
+    queryKey: ['tracked-order', token],
+    queryFn: () => apiRequest<TrackedOrder>(`/orders/track/${encodeURIComponent(token)}`),
+    retry: false,
+    enabled: /^[A-Za-z0-9_-]{43}$/.test(token),
+  });
+  if (!/^[A-Za-z0-9_-]{43}$/.test(token)) {
+    return (
+      <main className="mx-auto max-w-2xl px-6 py-20">
+        <ErrorNotice error={new Error('This tracking link is invalid.')} />
+      </main>
+    );
+  }
+  if (order.isPending) {
+    return <main className="mx-auto max-w-2xl px-6 py-20 text-stone-600">Loading your order…</main>;
+  }
+  if (order.error || !order.data) {
+    return (
+      <main className="mx-auto max-w-2xl px-6 py-20">
+        <ErrorNotice error={order.error ?? new Error('Order not found.')} />
+        <Link className="mt-5 inline-block text-emerald-900 underline" to="/">
           Return to the menu
         </Link>
+      </main>
+    );
+  }
+  const data = order.data;
+  return (
+    <main className="mx-auto min-h-screen max-w-3xl px-5 py-10 sm:px-8">
+      <header className="flex items-center justify-between border-b border-stone-200 pb-5">
+        <Link to="/" className="text-sm font-bold uppercase tracking-[0.16em] text-emerald-900">
+          Neighborhood Coffee &amp; Pasta
+        </Link>
+        <span className="text-sm text-stone-500">Order tracking</span>
+      </header>
+      <section className="mt-8 rounded-2xl border border-stone-200 bg-white p-6 shadow-sm sm:p-8">
+        <p className="text-sm font-semibold uppercase tracking-[0.16em] text-emerald-800">
+          {data.fulfillmentType === 'DELIVERY' ? 'Delivery order' : 'Pickup order'}
+        </p>
+        <h1 className="mt-2 text-3xl font-semibold text-stone-900">{data.orderNumber}</h1>
+        <p className="mt-2 text-sm text-stone-500">
+          Placed {new Date(data.createdAt).toLocaleString()}
+        </p>
+        <div className="mt-6 rounded-xl bg-emerald-50 p-4">
+          <p className="text-sm font-medium text-emerald-900">Current status</p>
+          <p className="mt-1 text-xl font-semibold text-emerald-950">
+            {orderStatusLabels[data.status]}
+          </p>
+        </div>
+        <h2 className="mt-8 text-lg font-semibold text-stone-900">Status timeline</h2>
+        <ol className="mt-4 space-y-4">
+          {data.statusHistory.map((entry, index) => (
+            <li key={`${entry.newStatus}-${entry.createdAt}-${index}`} className="flex gap-3">
+              <span className="mt-1.5 h-2.5 w-2.5 shrink-0 rounded-full bg-emerald-700" />
+              <div>
+                <p className="font-medium text-stone-900">{orderStatusLabels[entry.newStatus]}</p>
+                <p className="text-sm text-stone-500">
+                  {new Date(entry.createdAt).toLocaleString()}
+                  {entry.note ? ` · ${entry.note}` : ''}
+                </p>
+              </div>
+            </li>
+          ))}
+        </ol>
+        <h2 className="mt-8 text-lg font-semibold text-stone-900">Order summary</h2>
+        <div className="mt-3 divide-y divide-stone-100 rounded-xl border border-stone-200">
+          {data.items.map((item, index) => (
+            <div key={`${item.productName}-${index}`} className="flex justify-between gap-4 p-4">
+              <span className="text-stone-700">
+                {item.quantity} × {item.productName}
+              </span>
+              <span className="font-medium text-stone-900">{formatPrice(item.lineTotal)}</span>
+            </div>
+          ))}
+          <div className="flex justify-between p-4 text-sm text-stone-600">
+            <span>Subtotal</span>
+            <span>{formatPrice(data.subtotal)}</span>
+          </div>
+          <div className="flex justify-between p-4 text-sm text-stone-600">
+            <span>Delivery fee</span>
+            <span>{formatPrice(data.deliveryFee)}</span>
+          </div>
+          <div className="flex justify-between p-4 font-semibold text-stone-900">
+            <span>Total</span>
+            <span>{formatPrice(data.total)}</span>
+          </div>
+        </div>
+        <div className="mt-6 grid gap-5 sm:grid-cols-2">
+          <div>
+            <h2 className="font-semibold text-stone-900">Fulfillment</h2>
+            <p className="mt-1 text-sm text-stone-600">
+              {data.fulfillmentType === 'DELIVERY'
+                ? [data.block && `Block ${data.block}`, data.lot && `Lot ${data.lot}`, data.street]
+                    .filter(Boolean)
+                    .join(', ')
+                : data.pickupAddress || 'Pickup'}
+            </p>
+            {data.deliveryInstructions && (
+              <p className="mt-1 text-sm text-stone-600">{data.deliveryInstructions}</p>
+            )}
+            {data.fulfillmentType === 'PICKUP' && data.pickupInstructions && (
+              <p className="mt-1 text-sm text-stone-600">{data.pickupInstructions}</p>
+            )}
+          </div>
+          <div>
+            <h2 className="font-semibold text-stone-900">Payment</h2>
+            <p className="mt-1 text-sm text-stone-600">
+              {data.payment?.method === 'QR' ? 'QR payment' : 'Cash on delivery / pickup'}
+              {' · '}
+              {data.payment ? paymentStatusLabels[data.payment.status] : 'Pending'}
+            </p>
+          </div>
+        </div>
       </section>
     </main>
+  );
+}
+
+function DraggableOrderCard({
+  order,
+  onOpen,
+  onStatusChange,
+}: {
+  order: ManagedOrder;
+  onOpen: (order: ManagedOrder) => void;
+  onStatusChange: (order: ManagedOrder, status: OrderStatus) => void;
+}) {
+  const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({
+    id: order.id,
+  });
+  const style: CSSProperties = transform
+    ? { transform: `translate3d(${transform.x}px, ${transform.y}px, 0)` }
+    : {};
+  const allowedStatuses = nextOrderStatuses(order);
+
+  return (
+    <article
+      ref={setNodeRef}
+      style={{ ...style, opacity: isDragging ? 0.5 : 1 }}
+      className="rounded-xl border border-stone-200 bg-white p-4 shadow-sm"
+    >
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <p className="font-bold text-stone-900">{order.orderNumber}</p>
+          <p className="mt-1 text-sm text-stone-700">{order.customerName}</p>
+          <a className="text-sm text-emerald-900 underline" href={`tel:${order.customerPhone}`}>
+            {order.customerPhone}
+          </a>
+        </div>
+        <button
+          className="cursor-grab rounded-md border border-stone-200 px-2 py-1 text-xs text-stone-600 active:cursor-grabbing"
+          aria-label={`Drag order ${order.orderNumber}`}
+          {...listeners}
+          {...attributes}
+        >
+          Move
+        </button>
+      </div>
+      <p className="mt-3 text-xs text-stone-500">{new Date(order.createdAt).toLocaleString()}</p>
+      <p className="mt-2 text-sm font-medium text-stone-700">
+        {order.fulfillmentType === 'DELIVERY' ? 'Delivery' : 'Pickup'} ·{' '}
+        {order.fulfillmentType === 'DELIVERY'
+          ? [order.block && `Block ${order.block}`, order.lot && `Lot ${order.lot}`, order.street]
+              .filter(Boolean)
+              .join(', ')
+          : 'Store pickup'}
+      </p>
+      <p className="mt-2 line-clamp-2 text-sm text-stone-600">
+        {order.items.map((item) => `${item.quantity} × ${item.productName}`).join(', ')}
+      </p>
+      <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
+        <span className="text-sm font-semibold text-stone-900">{formatPrice(order.total)}</span>
+        <span className="rounded-full bg-stone-100 px-2.5 py-1 text-xs text-stone-700">
+          {order.payment?.method === 'QR' ? 'QR' : 'COD'} ·{' '}
+          {order.payment ? paymentStatusLabels[order.payment.status] : 'Pending'}
+        </span>
+      </div>
+      <button
+        className="mt-3 text-sm font-semibold text-emerald-900 underline"
+        onClick={() => onOpen(order)}
+      >
+        View details
+      </button>
+      {allowedStatuses.length > 0 && (
+        <label className="mt-3 block text-xs font-medium text-stone-600">
+          Update status
+          <select
+            className="mt-1 w-full rounded-lg border border-stone-300 bg-white px-2 py-2 text-sm"
+            value=""
+            onChange={(event) => {
+              if (event.target.value) onStatusChange(order, event.target.value as OrderStatus);
+            }}
+          >
+            <option value="">Choose next status</option>
+            {allowedStatuses.map((status) => (
+              <option key={status} value={status}>
+                {orderStatusLabels[status]}
+              </option>
+            ))}
+          </select>
+        </label>
+      )}
+    </article>
+  );
+}
+
+function OrderColumn({
+  status,
+  orders,
+  onOpen,
+  onStatusChange,
+}: {
+  status: OrderStatus;
+  orders: ManagedOrder[];
+  onOpen: (order: ManagedOrder) => void;
+  onStatusChange: (order: ManagedOrder, status: OrderStatus) => void;
+}) {
+  const { isOver, setNodeRef } = useDroppable({ id: status });
+  return (
+    <section
+      ref={setNodeRef}
+      className={`w-72 shrink-0 rounded-xl p-3 transition-colors ${
+        isOver ? 'bg-emerald-100' : 'bg-stone-100'
+      }`}
+      aria-label={`${orderStatusLabels[status]} orders`}
+    >
+      <h3 className="px-1 pb-3 font-semibold text-stone-800">
+        {orderStatusLabels[status]}{' '}
+        <span className="text-sm text-stone-500">({orders.length})</span>
+      </h3>
+      <div className="space-y-3">
+        {orders.map((order) => (
+          <DraggableOrderCard
+            key={order.id}
+            order={order}
+            onOpen={onOpen}
+            onStatusChange={onStatusChange}
+          />
+        ))}
+        {orders.length === 0 && <p className="px-1 py-5 text-sm text-stone-500">No orders</p>}
+      </div>
+    </section>
+  );
+}
+
+function OrderDetails({
+  order,
+  onClose,
+  onStatusChange,
+}: {
+  order: ManagedOrder;
+  onClose: () => void;
+  onStatusChange: (order: ManagedOrder, status: OrderStatus) => void;
+}) {
+  const allowedStatuses = nextOrderStatuses(order);
+  const paymentProof = useQuery({
+    queryKey: ['admin-order-payment-proof', order.id],
+    queryFn: () => apiBlobRequest(`/admin/orders/${order.id}/payment-proof`),
+    enabled: order.paymentMethod === 'QR',
+    retry: false,
+  });
+  const [paymentProofUrl, setPaymentProofUrl] = useState<string | null>(null);
+  useEffect(() => {
+    if (!paymentProof.data) {
+      setPaymentProofUrl(null);
+      return;
+    }
+    const objectUrl = URL.createObjectURL(paymentProof.data);
+    setPaymentProofUrl(objectUrl);
+    return () => URL.revokeObjectURL(objectUrl);
+  }, [paymentProof.data]);
+
+  return (
+    <div className="fixed inset-0 z-20 flex items-end justify-center bg-stone-950/40 p-0 sm:items-center sm:p-5">
+      <section className="max-h-[95vh] w-full max-w-2xl overflow-y-auto rounded-t-2xl bg-white p-6 sm:rounded-2xl">
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <p className="text-sm font-semibold uppercase tracking-[0.14em] text-emerald-800">
+              {order.fulfillmentType === 'DELIVERY' ? 'Delivery' : 'Pickup'} order
+            </p>
+            <h2 className="mt-1 text-2xl font-semibold text-stone-900">{order.orderNumber}</h2>
+          </div>
+          <button
+            className="rounded-lg border border-stone-300 px-3 py-2 text-sm"
+            onClick={onClose}
+          >
+            Close
+          </button>
+        </div>
+        <div className="mt-5 grid gap-4 sm:grid-cols-2">
+          <div className="rounded-lg bg-stone-50 p-4">
+            <h3 className="font-semibold text-stone-900">Customer</h3>
+            <p className="mt-2 text-sm text-stone-700">{order.customerName}</p>
+            <a className="text-sm text-emerald-900 underline" href={`tel:${order.customerPhone}`}>
+              {order.customerPhone}
+            </a>
+          </div>
+          <div className="rounded-lg bg-stone-50 p-4">
+            <h3 className="font-semibold text-stone-900">Fulfillment</h3>
+            <p className="mt-2 text-sm text-stone-700">
+              {order.fulfillmentType === 'DELIVERY'
+                ? [
+                    order.block && `Block ${order.block}`,
+                    order.lot && `Lot ${order.lot}`,
+                    order.street,
+                  ]
+                    .filter(Boolean)
+                    .join(', ')
+                : 'Store pickup'}
+            </p>
+            {order.deliveryInstructions && (
+              <p className="mt-1 text-sm text-stone-600">{order.deliveryInstructions}</p>
+            )}
+          </div>
+        </div>
+        <h3 className="mt-6 font-semibold text-stone-900">Items</h3>
+        <div className="mt-2 divide-y divide-stone-100 rounded-lg border border-stone-200">
+          {order.items.map((item) => (
+            <div key={item.id} className="flex justify-between gap-3 p-3 text-sm">
+              <span className="text-stone-700">
+                {item.quantity} × {item.productName}
+              </span>
+              <span className="font-medium text-stone-900">{formatPrice(item.lineTotal)}</span>
+            </div>
+          ))}
+        </div>
+        <div className="mt-3 flex justify-between text-sm text-stone-600">
+          <span>Subtotal + delivery fee</span>
+          <span>
+            {formatPrice(order.subtotal)} + {formatPrice(order.deliveryFee)}
+          </span>
+        </div>
+        <div className="mt-2 flex justify-between font-semibold text-stone-900">
+          <span>Total</span>
+          <span>{formatPrice(order.total)}</span>
+        </div>
+        <p className="mt-3 text-sm text-stone-700">
+          Payment: {order.payment?.method === 'QR' ? 'QR' : 'COD'} ·{' '}
+          {order.payment ? paymentStatusLabels[order.payment.status] : 'Pending'}
+        </p>
+        {order.paymentMethod === 'QR' && (
+          <section className="mt-4 rounded-lg border border-stone-200 bg-stone-50 p-4">
+            <h3 className="font-semibold text-stone-900">Payment receipt</h3>
+            {paymentProof.isPending ? (
+              <p className="mt-2 text-sm text-stone-600">Loading receipt…</p>
+            ) : paymentProofUrl ? (
+              <a
+                className="mt-3 inline-block"
+                href={paymentProofUrl}
+                target="_blank"
+                rel="noreferrer"
+                aria-label={`Open payment receipt for ${order.orderNumber} in a new tab`}
+              >
+                <img
+                  className="max-h-96 max-w-full rounded-lg border border-stone-200 bg-white object-contain"
+                  src={paymentProofUrl}
+                  alt={`QR payment receipt for order ${order.orderNumber}`}
+                />
+                <span className="mt-2 block text-sm font-medium text-emerald-900 underline">
+                  Open receipt full size
+                </span>
+              </a>
+            ) : (
+              <ErrorNotice
+                error={paymentProof.error ?? new Error('Payment receipt is unavailable.')}
+              />
+            )}
+          </section>
+        )}
+        <h3 className="mt-6 font-semibold text-stone-900">Status history</h3>
+        <ol className="mt-3 space-y-3">
+          {order.statusHistory.map((entry) => (
+            <li key={entry.id} className="text-sm">
+              <span className="font-medium text-stone-800">
+                {orderStatusLabels[entry.newStatus]}
+              </span>
+              <span className="text-stone-500">
+                {' '}
+                · {new Date(entry.createdAt).toLocaleString()}
+                {entry.changedBy ? ` · ${entry.changedBy.name}` : ''}
+                {entry.note ? ` · ${entry.note}` : ''}
+              </span>
+            </li>
+          ))}
+        </ol>
+        {allowedStatuses.length > 0 && (
+          <div className="mt-6 flex flex-wrap gap-2">
+            {allowedStatuses.map((status) => (
+              <button
+                key={status}
+                className="rounded-lg bg-emerald-900 px-4 py-2 text-sm font-semibold text-white"
+                onClick={() => onStatusChange(order, status)}
+              >
+                {orderStatusLabels[status]}
+              </button>
+            ))}
+          </div>
+        )}
+      </section>
+    </div>
+  );
+}
+
+function AdminOrdersBoard() {
+  const queryClient = useQueryClient();
+  const [fulfillment, setFulfillment] = useState('');
+  const [paymentStatus, setPaymentStatus] = useState('');
+  const [statusFilter, setStatusFilter] = useState('');
+  const [fromDate, setFromDate] = useState('');
+  const [toDate, setToDate] = useState('');
+  const [selectedOrder, setSelectedOrder] = useState<ManagedOrder | null>(null);
+  const params = new URLSearchParams();
+  if (fulfillment) params.set('fulfillmentType', fulfillment);
+  if (paymentStatus) params.set('paymentStatus', paymentStatus);
+  if (statusFilter) params.set('status', statusFilter);
+  if (fromDate) params.set('from', new Date(`${fromDate}T00:00:00`).toISOString());
+  if (toDate) params.set('to', new Date(`${toDate}T23:59:59.999`).toISOString());
+  const queryString = params.toString();
+  const orders = useQuery({
+    queryKey: ['admin-orders', queryString],
+    queryFn: () =>
+      apiRequest<ManagedOrder[]>(`/admin/orders${queryString ? `?${queryString}` : ''}`),
+  });
+  const updateStatus = useMutation({
+    mutationFn: ({ order, status }: { order: ManagedOrder; status: OrderStatus }) =>
+      apiRequest<ManagedOrder>(`/admin/orders/${order.id}/status`, {
+        method: 'PATCH',
+        body: jsonBody({ status }),
+      }),
+    onSuccess: async () => {
+      setSelectedOrder(null);
+      await queryClient.invalidateQueries({ queryKey: ['admin-orders'] });
+    },
+  });
+
+  function onDragEnd(event: DragEndEvent) {
+    if (!event.over) return;
+    const order = orders.data?.find((item) => item.id === event.active.id);
+    const status = String(event.over.id) as OrderStatus;
+    if (order && orderStatuses.includes(status) && nextOrderStatuses(order).includes(status)) {
+      updateStatus.mutate({ order, status });
+    }
+  }
+
+  return (
+    <section className="mt-5">
+      <div className="grid gap-3 rounded-xl border border-stone-200 bg-white p-4 sm:grid-cols-2 lg:grid-cols-5">
+        <label className="text-xs font-medium text-stone-600">
+          Status
+          <select
+            className="mt-1 block w-full rounded-lg border border-stone-300 bg-white p-2 text-sm"
+            value={statusFilter}
+            onChange={(event) => setStatusFilter(event.target.value)}
+          >
+            <option value="">All statuses</option>
+            {orderStatuses.map((status) => (
+              <option key={status} value={status}>
+                {orderStatusLabels[status]}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="text-xs font-medium text-stone-600">
+          Fulfillment
+          <select
+            className="mt-1 block w-full rounded-lg border border-stone-300 bg-white p-2 text-sm"
+            value={fulfillment}
+            onChange={(event) => setFulfillment(event.target.value)}
+          >
+            <option value="">Delivery and pickup</option>
+            <option value="DELIVERY">Delivery</option>
+            <option value="PICKUP">Pickup</option>
+          </select>
+        </label>
+        <label className="text-xs font-medium text-stone-600">
+          Payment
+          <select
+            className="mt-1 block w-full rounded-lg border border-stone-300 bg-white p-2 text-sm"
+            value={paymentStatus}
+            onChange={(event) => setPaymentStatus(event.target.value)}
+          >
+            <option value="">All payment states</option>
+            {(['UNPAID', 'AWAITING_VERIFICATION', 'PAID', 'REJECTED', 'REFUNDED'] as const).map(
+              (status) => (
+                <option key={status} value={status}>
+                  {paymentStatusLabels[status]}
+                </option>
+              ),
+            )}
+          </select>
+        </label>
+        <label className="text-xs font-medium text-stone-600">
+          From
+          <input
+            className="mt-1 block w-full rounded-lg border border-stone-300 p-2 text-sm"
+            type="date"
+            value={fromDate}
+            onChange={(event) => setFromDate(event.target.value)}
+          />
+        </label>
+        <label className="text-xs font-medium text-stone-600">
+          To
+          <input
+            className="mt-1 block w-full rounded-lg border border-stone-300 p-2 text-sm"
+            type="date"
+            value={toDate}
+            onChange={(event) => setToDate(event.target.value)}
+          />
+        </label>
+      </div>
+      <ErrorNotice error={orders.error ?? updateStatus.error} />
+      {orders.isPending ? (
+        <p className="py-8 text-stone-600">Loading orders…</p>
+      ) : (
+        <DndContext onDragEnd={onDragEnd}>
+          <div className="mt-5 flex items-start gap-4 overflow-x-auto pb-5">
+            {orderStatuses.map((status) => (
+              <OrderColumn
+                key={status}
+                status={status}
+                orders={orders.data?.filter((order) => order.status === status) ?? []}
+                onOpen={setSelectedOrder}
+                onStatusChange={(order, nextStatus) =>
+                  updateStatus.mutate({ order, status: nextStatus })
+                }
+              />
+            ))}
+          </div>
+        </DndContext>
+      )}
+      {selectedOrder && (
+        <OrderDetails
+          key={selectedOrder.id}
+          order={selectedOrder}
+          onClose={() => setSelectedOrder(null)}
+          onStatusChange={(order, status) => updateStatus.mutate({ order, status })}
+        />
+      )}
+    </section>
+  );
+}
+
+function QrImageSettings() {
+  const queryClient = useQueryClient();
+  const [imageFile, setImageFile] = useState<File | null>(null);
+  const image = useQuery({
+    queryKey: ['admin-qr-image'],
+    queryFn: () => apiRequest<{ imagePath: string | null }>('/admin/settings/qr-image'),
+  });
+  const upload = useMutation({
+    mutationFn: async () => {
+      if (!imageFile) throw new Error('Select a QR payment image first.');
+      if (imageFile.size > 5 * 1024 * 1024) throw new Error('Choose an image smaller than 5 MB.');
+      return apiRequest<{ imagePath: string }>('/admin/settings/qr-image', {
+        method: 'PUT',
+        body: jsonBody({ data: await imageData(imageFile) }),
+      });
+    },
+    onSuccess: () => {
+      setImageFile(null);
+      return Promise.all([
+        queryClient.invalidateQueries({ queryKey: ['admin-qr-image'] }),
+        queryClient.invalidateQueries({ queryKey: ['store'] }),
+      ]);
+    },
+  });
+  const remove = useMutation({
+    mutationFn: () => apiRequest('/admin/settings/qr-image', { method: 'DELETE' }),
+    onSuccess: () =>
+      Promise.all([
+        queryClient.invalidateQueries({ queryKey: ['admin-qr-image'] }),
+        queryClient.invalidateQueries({ queryKey: ['store'] }),
+      ]),
+  });
+
+  return (
+    <section className="mt-5 max-w-2xl rounded-xl border border-stone-200 bg-white p-5">
+      <h2 className="text-xl font-semibold text-stone-900">QR payment image</h2>
+      <p className="mt-2 text-sm leading-6 text-stone-600">
+        This image is displayed to customers when they choose QR payment. Use only a payment QR for
+        the store account.
+      </p>
+      <ErrorNotice error={image.error ?? upload.error ?? remove.error} />
+      {image.data?.imagePath ? (
+        <img
+          className="mt-4 max-h-72 max-w-full rounded-lg border border-stone-200 object-contain"
+          src={`${apiUrl}${image.data.imagePath}`}
+          alt="Current store QR payment code"
+        />
+      ) : (
+        <p className="mt-4 rounded-lg bg-amber-50 p-4 text-sm text-amber-900">
+          No store QR image configured. Checkout will show the demo placeholder.
+        </p>
+      )}
+      <label className="mt-5 block text-sm font-medium text-stone-700">
+        {image.data?.imagePath ? 'Replace QR image' : 'Upload QR image'}
+        <input
+          className="mt-2 block w-full text-sm"
+          type="file"
+          accept="image/jpeg,image/png,image/webp"
+          onChange={(event) => setImageFile(event.target.files?.[0] ?? null)}
+        />
+      </label>
+      <div className="mt-4 flex flex-wrap gap-3">
+        <button
+          className="rounded-lg bg-emerald-900 px-4 py-2.5 font-semibold text-white disabled:opacity-50"
+          disabled={!imageFile || upload.isPending}
+          onClick={() => upload.mutate()}
+        >
+          {upload.isPending ? 'Saving…' : 'Save QR image'}
+        </button>
+        {image.data?.imagePath && (
+          <button
+            className="rounded-lg border border-stone-300 px-4 py-2.5 text-sm font-semibold text-red-800 disabled:opacity-50"
+            disabled={remove.isPending}
+            onClick={() => remove.mutate()}
+          >
+            Remove current image
+          </button>
+        )}
+      </div>
+    </section>
   );
 }
 
@@ -1122,7 +1839,7 @@ function CategoryEditor({ category, onClose }: { category: Category | null; onCl
 
 function AdminDashboard({ owner }: { owner: Owner }) {
   const queryClient = useQueryClient();
-  const [section, setSection] = useState<'products' | 'categories'>('products');
+  const [section, setSection] = useState<'orders' | 'products' | 'categories' | 'qr'>('orders');
   const [editingProduct, setEditingProduct] = useState<Product | null | undefined>(undefined);
   const [editingCategory, setEditingCategory] = useState<Category | null | undefined>(undefined);
   const [showArchived, setShowArchived] = useState(false);
@@ -1182,7 +1899,7 @@ function AdminDashboard({ owner }: { owner: Owner }) {
 
   return (
     <>
-      <main className="mx-auto min-h-screen max-w-6xl px-5 py-8 sm:px-8">
+      <main className="min-h-screen w-full px-5 py-8 sm:px-8">
         <header className="flex flex-wrap items-center justify-between gap-4 border-b border-stone-200 pb-5">
           <div>
             <Link to="/" className="text-xs font-bold uppercase tracking-[0.16em] text-emerald-900">
@@ -1214,18 +1931,18 @@ function AdminDashboard({ owner }: { owner: Owner }) {
             >
               Add product
             </button>
-          ) : (
+          ) : section === 'categories' ? (
             <button
               className="rounded-lg bg-emerald-900 px-4 py-2.5 font-semibold text-white"
               onClick={() => setEditingCategory(null)}
             >
               Add category
             </button>
-          )}
+          ) : null}
         </div>
 
         <nav className="mt-7 flex gap-2 border-b border-stone-200" aria-label="Admin sections">
-          {(['products', 'categories'] as const).map((item) => (
+          {(['orders', 'products', 'categories', 'qr'] as const).map((item) => (
             <button
               key={item}
               className={`border-b-2 px-4 py-3 text-sm font-semibold capitalize ${
@@ -1235,14 +1952,18 @@ function AdminDashboard({ owner }: { owner: Owner }) {
               }`}
               onClick={() => setSection(item)}
             >
-              {item}
+              {item === 'qr' ? 'QR payment' : item}
             </button>
           ))}
         </nav>
 
         <div className="mt-5">
           <ErrorNotice error={logout.error ?? categories.error} />
-          {section === 'products' ? (
+          {section === 'orders' ? (
+            <AdminOrdersBoard />
+          ) : section === 'qr' ? (
+            <QrImageSettings />
+          ) : section === 'products' ? (
             <>
               {categories.data?.length === 0 && (
                 <p className="mb-4 rounded-lg bg-amber-50 p-4 text-sm text-amber-900">

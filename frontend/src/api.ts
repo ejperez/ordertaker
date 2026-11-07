@@ -17,6 +17,15 @@ export async function apiRequest<T>(path: string, init: RequestInit = {}): Promi
   return (await response.json()) as T;
 }
 
+export async function apiBlobRequest(path: string): Promise<Blob> {
+  const response = await fetch(`${apiUrl}/api${path}`, { credentials: 'include' });
+  if (!response.ok) {
+    const body = (await response.json().catch(() => null)) as { error?: string } | null;
+    throw new Error(body?.error ?? `Request failed (${response.status})`);
+  }
+  return response.blob();
+}
+
 export function jsonBody(value: unknown): string {
   return JSON.stringify(value);
 }

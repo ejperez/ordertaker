@@ -1,6 +1,7 @@
 # Ordertaker
 
-Phase 3 implementation for a small, single-location food ordering application.
+A single-location food ordering application with guest checkout, secure order
+tracking, and owner-managed order workflows.
 
 ## Requirements
 
@@ -66,8 +67,18 @@ database stores only its hash, and duplicate requests do not create another
 order. The tracking token is random and only its hash is stored.
 QR checkout requires a JPEG, PNG, or WebP payment-receipt image (up to 5 MB).
 Receipt files are stored under `backend/private/uploads/payment-proofs/`,
-outside the public static-file directory; owner review and authorized proof
-access are planned for the payment-verification phase.
+outside the public static-file directory. The owner can view QR receipts in the
+order details panel through an authenticated endpoint; payment approval and
+rejection are planned for the payment-verification phase.
+
+Customers can track an order at the one-time `/track/:token` URL returned after
+checkout. The API stores only a hash of the tracking token and returns order
+status history, fulfillment details, and an itemized total to its bearer. The
+owner dashboard at `/admin` includes a filterable order board with validated
+drag-and-drop and mobile status controls; each status update is recorded in
+order history. The QR payment tab lets the owner upload, replace, or remove the
+store payment QR image, which is served from the public `/uploads/` static-file
+mount and shown during QR checkout.
 
 `npm run build`, `npm run lint`, and `npm run format:check` provide local
 quality checks.

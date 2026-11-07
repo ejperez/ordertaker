@@ -932,17 +932,17 @@ the stored order totals and fulfillment details are correct.
 
 ### Phase 4 --- Customer tracking and admin order board
 
--   [ ] Implement secure token-based order lookup.
--   [ ] Build the customer tracking page and status timeline.
--   [ ] Implement order status history.
--   [ ] Implement backend transition validation for delivery and pickup
+-   [x] Implement secure token-based order lookup.
+-   [x] Build the customer tracking page and status timeline.
+-   [x] Implement order status history.
+-   [x] Implement backend transition validation for delivery and pickup
     workflows.
--   [ ] Build the admin Kanban board.
--   [ ] Add order detail view and filters.
--   [ ] Add drag-and-drop and a mobile-friendly status control.
--   [ ] Ensure order cards show the correct fulfillment and payment
+-   [x] Build the admin Kanban board.
+-   [x] Add order detail view and filters.
+-   [x] Add drag-and-drop and a mobile-friendly status control.
+-   [x] Ensure order cards show the correct fulfillment and payment
     details.
--   [ ] Add owner controls to upload and replace the store QR payment
+-   [x] Add owner controls to upload and replace the store QR payment
     image.
 
 **Done when:** the owner can process delivery and pickup orders through

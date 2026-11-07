@@ -1,11 +1,15 @@
 import { randomUUID } from 'node:crypto';
-import { mkdir, unlink, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, unlink, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const productsDirectory = resolve(
   dirname(fileURLToPath(import.meta.url)),
   '../../public/uploads/products',
+);
+const storeImagesDirectory = resolve(
+  dirname(fileURLToPath(import.meta.url)),
+  '../../public/uploads/store',
 );
 const paymentProofsDirectory = resolve(
   dirname(fileURLToPath(import.meta.url)),
@@ -39,7 +43,12 @@ export class ImageValidationError extends Error {}
 export interface ImageStorageService {
   saveProductImage(data: string): Promise<string>;
   removeProductImage(imagePath: string | null): Promise<void>;
+  saveQrPaymentImage(data: string): Promise<string>;
+  removeQrPaymentImage(imagePath: string | null): Promise<void>;
   savePaymentProof(data: string): Promise<string>;
+  readPaymentProof(
+    proofPath: string | null,
+  ): Promise<{ bytes: Buffer; contentType: string } | null>;
   removePaymentProof(proofPath: string | null): Promise<void>;
 }
 
@@ -76,6 +85,25 @@ export class LocalImageStorageService implements ImageStorageService {
     await unlink(resolve(productsDirectory, filename));
   }
 
+  async saveQrPaymentImage(data: string): Promise<string> {
+    const image = decodeImage(data);
+    await mkdir(storeImagesDirectory, { recursive: true });
+    const filename = `${randomUUID()}${image.extension}`;
+    await writeFile(resolve(storeImagesDirectory, filename), image.bytes, { flag: 'wx' });
+    return `/uploads/store/${filename}`;
+  }
+
+  async removeQrPaymentImage(imagePath: string | null): Promise<void> {
+    if (!imagePath) return;
+    const filename = imagePath.startsWith('/uploads/store/')
+      ? imagePath.slice('/uploads/store/'.length)
+      : '';
+    if (!storedFilenamePattern.test(filename)) {
+      throw new ImageValidationError('Invalid stored QR payment image path');
+    }
+    await unlink(resolve(storeImagesDirectory, filename));
+  }
+
   async savePaymentProof(data: string): Promise<string> {
     const image = decodeImage(data);
     await mkdir(paymentProofsDirectory, { recursive: true });
@@ -84,10 +112,36 @@ export class LocalImageStorageService implements ImageStorageService {
     return `payment-proofs/${filename}`;
   }
 
+  async readPaymentProof(
+    proofPath: string | null,
+  ): Promise<{ bytes: Buffer; contentType: string } | null> {
+    if (!proofPath) return null;
+    const [directory, filename, ...extraParts] = proofPath.split('/');
+    if (
+      directory !== 'payment-proofs' ||
+      extraParts.length > 0 ||
+      !filename ||
+      !storedFilenamePattern.test(filename)
+    ) {
+      throw new ImageValidationError('Invalid stored payment proof path');
+    }
+
+    const extension = filename.slice(filename.lastIndexOf('.')).toLowerCase();
+    const contentType =
+      extension === '.jpg' ? 'image/jpeg' : extension === '.png' ? 'image/png' : 'image/webp';
+    const bytes = await readFile(resolve(paymentProofsDirectory, filename));
+    return { bytes, contentType };
+  }
+
   async removePaymentProof(proofPath: string | null): Promise<void> {
     if (!proofPath) return;
-    const [directory, filename] = proofPath.split('/');
-    if (directory !== 'payment-proofs' || !filename || !storedFilenamePattern.test(filename)) {
+    const [directory, filename, ...extraParts] = proofPath.split('/');
+    if (
+      directory !== 'payment-proofs' ||
+      extraParts.length > 0 ||
+      !filename ||
+      !storedFilenamePattern.test(filename)
+    ) {
       throw new ImageValidationError('Invalid stored payment proof path');
     }
     await unlink(resolve(paymentProofsDirectory, filename));
