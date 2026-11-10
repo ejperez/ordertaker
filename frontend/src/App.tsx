@@ -1,10 +1,18 @@
 import { DndContext, useDraggable, useDroppable, type DragEndEvent } from '@dnd-kit/core';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { io } from 'socket.io-client';
 import { useEffect, useRef, useState, type CSSProperties, type FormEvent } from 'react';
 import { Link, Route, Routes, useParams } from 'react-router-dom';
 import { apiBlobRequest, apiRequest, apiUrl, jsonBody } from './api';
 
 type Owner = { id: string; name: string; email: string };
+type OrderMessage = {
+  id: string;
+  senderType: 'CUSTOMER' | 'OWNER';
+  senderName: string;
+  message: string;
+  createdAt: string;
+};
 type Category = { id: string; name: string; slug: string; sortOrder: number; isActive: boolean };
 type Product = {
   id: string;
@@ -211,6 +219,73 @@ function ErrorNotice({ error }: { error: unknown }) {
       {error.message}
     </p>
   );
+}
+
+function useOwnerRealtime(): boolean {
+  const queryClient = useQueryClient();
+  const [connected, setConnected] = useState(false);
+  useEffect(() => {
+    const socket = io(apiUrl, {
+      path: '/api/admin/socket.io',
+      withCredentials: true,
+      reconnection: true,
+      auth: { role: 'owner' },
+    });
+    const refresh = () => {
+      void queryClient.invalidateQueries({ queryKey: ['admin-orders'] });
+      void queryClient.invalidateQueries({ queryKey: ['order-messages'] });
+    };
+    const onConnect = () => {
+      setConnected(true);
+      refresh();
+    };
+    const onDisconnect = () => setConnected(false);
+
+    socket.on('connect', onConnect);
+    socket.on('disconnect', onDisconnect);
+    socket.on('order:created', refresh);
+    socket.on('order:updated', refresh);
+    socket.on('payment:updated', refresh);
+    socket.on('message:new', refresh);
+    return () => {
+      socket.disconnect();
+    };
+  }, [queryClient]);
+  return connected;
+}
+
+function useCustomerRealtime(token: string): boolean {
+  const queryClient = useQueryClient();
+  const [connected, setConnected] = useState(false);
+  useEffect(() => {
+    if (!/^[A-Za-z0-9_-]{43}$/.test(token)) return;
+    const socket = io(apiUrl, {
+      path: '/api/admin/socket.io',
+      withCredentials: true,
+      reconnection: true,
+      auth: { role: 'customer', trackingToken: token },
+    });
+    const refresh = () => {
+      void queryClient.invalidateQueries({ queryKey: ['tracked-order', token] });
+      void queryClient.invalidateQueries({ queryKey: ['order-messages', 'customer', token] });
+    };
+    const onConnect = () => {
+      setConnected(true);
+      refresh();
+    };
+    const onDisconnect = () => setConnected(false);
+
+    socket.on('connect', onConnect);
+    socket.on('disconnect', onDisconnect);
+    socket.on('order:updated', refresh);
+    socket.on('payment:updated', refresh);
+    socket.on('message:new', refresh);
+    return () => {
+      socket.disconnect();
+      setConnected(false);
+    };
+  }, [queryClient, token]);
+  return connected;
 }
 
 function HomePage({
@@ -954,11 +1029,13 @@ function CheckoutPage({
 
 function TrackingLinkPage() {
   const { token = '' } = useParams();
+  const realtimeConnected = useCustomerRealtime(token);
   const order = useQuery({
     queryKey: ['tracked-order', token],
     queryFn: () => apiRequest<TrackedOrder>(`/orders/track/${encodeURIComponent(token)}`),
     retry: false,
     enabled: /^[A-Za-z0-9_-]{43}$/.test(token),
+    refetchInterval: 30_000,
   });
   const store = useQuery({
     queryKey: ['store'],
@@ -993,6 +1070,11 @@ function TrackingLinkPage() {
         </Link>
         <span className="text-sm text-stone-500">Order tracking</span>
       </header>
+      {!realtimeConnected && (
+        <p className="mt-4 text-xs text-stone-500" role="status">
+          Live updates are reconnecting; this page will continue refreshing.
+        </p>
+      )}
       <section className="mt-8 rounded-2xl border border-stone-200 bg-white p-6 shadow-sm sm:p-8">
         <p className="text-sm font-semibold uppercase tracking-[0.16em] text-emerald-800">
           {data.fulfillmentType === 'DELIVERY' ? 'Delivery order' : 'Pickup order'}
@@ -1107,8 +1189,108 @@ function TrackingLinkPage() {
             )}
           </div>
         </div>
+        <OrderMessages side="customer" trackingToken={token} />
       </section>
     </main>
+  );
+}
+
+function OrderMessages({
+  side,
+  orderId,
+  trackingToken,
+}: {
+  side: 'owner' | 'customer';
+  orderId?: string;
+  trackingToken?: string;
+}) {
+  const queryClient = useQueryClient();
+  const [messageText, setMessageText] = useState('');
+  const identifier = side === 'owner' ? (orderId ?? '') : (trackingToken ?? '');
+  const messagesPath =
+    side === 'owner'
+      ? `/admin/orders/${encodeURIComponent(identifier)}/messages`
+      : `/orders/track/${encodeURIComponent(identifier)}/messages`;
+  const queryKey =
+    side === 'owner'
+      ? (['order-messages', 'owner', identifier] as const)
+      : (['order-messages', 'customer', identifier] as const);
+  const messages = useQuery({
+    queryKey,
+    queryFn: () => apiRequest<OrderMessage[]>(messagesPath),
+    enabled: Boolean(identifier),
+    refetchInterval: 30_000,
+  });
+  const send = useMutation({
+    mutationFn: () =>
+      apiRequest<OrderMessage>(messagesPath, {
+        method: 'POST',
+        body: jsonBody({ message: messageText }),
+      }),
+    onSuccess: async () => {
+      setMessageText('');
+      await queryClient.invalidateQueries({ queryKey });
+    },
+  });
+
+  function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    send.mutate();
+  }
+
+  return (
+    <section className="mt-8 border-t border-stone-200 pt-6">
+      <h2 className="text-lg font-semibold text-stone-900">Order messages</h2>
+      <div
+        className="mt-3 max-h-72 space-y-3 overflow-y-auto rounded-xl bg-stone-50 p-4"
+        aria-live="polite"
+      >
+        {messages.isPending ? (
+          <p className="text-sm text-stone-500">Loading messages…</p>
+        ) : messages.data?.length ? (
+          messages.data.map((entry) => (
+            <article
+              key={entry.id}
+              className={`max-w-[90%] rounded-lg p-3 text-sm ${
+                (side === 'owner' && entry.senderType === 'OWNER') ||
+                (side === 'customer' && entry.senderType === 'CUSTOMER')
+                  ? 'ml-auto bg-emerald-100 text-emerald-950'
+                  : 'bg-white text-stone-800'
+              }`}
+            >
+              <p className="font-semibold">{entry.senderName}</p>
+              <p className="mt-1 whitespace-pre-wrap break-words">{entry.message}</p>
+              <time className="mt-2 block text-xs text-stone-500">
+                {new Date(entry.createdAt).toLocaleString()}
+              </time>
+            </article>
+          ))
+        ) : (
+          <p className="text-sm text-stone-500">No messages yet.</p>
+        )}
+      </div>
+      <ErrorNotice error={messages.error ?? send.error} />
+      <form className="mt-3 flex flex-col gap-2 sm:flex-row" onSubmit={submit}>
+        <label className="sr-only" htmlFor={`message-${side}-${identifier}`}>
+          Write a message
+        </label>
+        <input
+          id={`message-${side}-${identifier}`}
+          className="min-w-0 flex-1 rounded-lg border border-stone-300 px-3 py-2.5 text-sm"
+          value={messageText}
+          maxLength={2000}
+          required
+          placeholder="Write a message…"
+          onChange={(event) => setMessageText(event.target.value)}
+        />
+        <button
+          className="rounded-lg bg-emerald-900 px-4 py-2.5 text-sm font-semibold text-white disabled:opacity-50"
+          disabled={send.isPending || !messageText.trim()}
+        >
+          {send.isPending ? 'Sending…' : 'Send'}
+        </button>
+      </form>
+    </section>
   );
 }
 
@@ -1504,6 +1686,7 @@ function OrderDetails({
             </li>
           ))}
         </ol>
+        <OrderMessages side="owner" orderId={order.id} />
         {allowedStatuses.length > 0 && (
           <div className="mt-6 flex flex-wrap gap-2">
             {allowedStatuses.map((status) => (
@@ -1618,6 +1801,7 @@ function AdminOrdersBoard() {
     queryKey: ['admin-orders', queryString],
     queryFn: () =>
       apiRequest<ManagedOrder[]>(`/admin/orders${queryString ? `?${queryString}` : ''}`),
+    refetchInterval: 30_000,
   });
   const updateStatus = useMutation({
     mutationFn: ({ order, status }: { order: ManagedOrder; status: OrderStatus }) =>
@@ -1746,6 +1930,7 @@ function AdminPaymentsReview() {
   const orders = useQuery({
     queryKey: ['admin-orders', 'payment-review', paymentFilter],
     queryFn: () => apiRequest<ManagedOrder[]>(`/admin/orders${queryString}`),
+    refetchInterval: 30_000,
   });
   const updateStatus = useMutation({
     mutationFn: ({ order, status }: { order: ManagedOrder; status: OrderStatus }) =>
@@ -2272,6 +2457,7 @@ function CategoryEditor({ category, onClose }: { category: Category | null; onCl
 
 function AdminDashboard({ owner }: { owner: Owner }) {
   const queryClient = useQueryClient();
+  const realtimeConnected = useOwnerRealtime();
   const [section, setSection] = useState<'orders' | 'payments' | 'products' | 'categories' | 'qr'>(
     'orders',
   );
@@ -2350,6 +2536,11 @@ function AdminDashboard({ owner }: { owner: Owner }) {
             Sign out
           </button>
         </header>
+        {!realtimeConnected && (
+          <p className="mt-3 text-xs text-stone-500" role="status">
+            Live updates are reconnecting; order and payment lists will continue refreshing.
+          </p>
+        )}
 
         <div className="mt-8 flex flex-wrap items-end justify-between gap-5">
           <div>

@@ -13,6 +13,7 @@ import {
 } from '../auth.js';
 import { prisma } from '../db.js';
 import { consumeLoginAttempt } from '../rate-limit.js';
+import { revokeOwnerSockets } from '../realtime.js';
 
 const loginSchema = z.object({
   email: z.string().trim().email().max(254),
@@ -61,6 +62,7 @@ export const adminAuthRoutes: FastifyPluginAsync = async (app) => {
     const token = readSessionCookie(request);
     if (token)
       await prisma.adminSession.deleteMany({ where: { tokenHash: hashSessionToken(token) } });
+    revokeOwnerSockets(request.owner!.id);
     clearSessionCookie(reply);
     return reply.code(204).send();
   });

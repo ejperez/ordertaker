@@ -965,15 +965,15 @@ collection.
 
 ### Phase 6 --- Real-time updates and messaging
 
--   [ ] Attach Socket.IO to the Fastify HTTP server.
--   [ ] Authenticate owner socket connections.
--   [ ] Authorize customer order-room access using the tracking token.
--   [ ] Broadcast newly created orders to the admin dashboard.
--   [ ] Broadcast status and payment updates to the relevant order room.
--   [ ] Persist order-linked messages.
--   [ ] Implement customer and owner messaging screens.
--   [ ] Broadcast new messages to the other authorized participant.
--   [ ] Handle disconnect/reconnect and refetch current state through
+-   [x] Attach Socket.IO to the Fastify HTTP server.
+-   [x] Authenticate owner socket connections.
+-   [x] Authorize customer order-room access using the tracking token.
+-   [x] Broadcast newly created orders to the admin dashboard.
+-   [x] Broadcast status and payment updates to the relevant order room.
+-   [x] Persist order-linked messages.
+-   [x] Implement customer and owner messaging screens.
+-   [x] Broadcast new messages to the other authorized participant.
+-   [x] Handle disconnect/reconnect and refetch current state through
     REST.
 
 **Done when:** new orders, status changes, payment changes, and messages

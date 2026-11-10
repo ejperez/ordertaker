@@ -9,11 +9,15 @@ import { env } from './config/env.js';
 import { prisma } from './db.js';
 import { healthRoutes } from './routes/health.js';
 import { registerStaticFiles } from './static-files.js';
+import { attachRealtimeServer, closeRealtimeServer } from './realtime.js';
 
 export async function buildApp() {
   const app = Fastify({ logger: true });
   app.decorateRequest('owner', null);
-  app.addHook('onClose', async () => prisma.$disconnect());
+  app.addHook('onClose', async () => {
+    await closeRealtimeServer();
+    await prisma.$disconnect();
+  });
 
   await app.register(cors, {
     origin: env.FRONTEND_ORIGIN,
@@ -27,6 +31,7 @@ export async function buildApp() {
   await app.register(adminOrderRoutes, { prefix: '/api/admin' });
   await app.register(catalogRoutes, { prefix: '/api' });
   await app.register(orderRoutes, { prefix: '/api' });
+  attachRealtimeServer(app.server);
 
   app.setErrorHandler((error, request, reply) => {
     request.log.error(error);

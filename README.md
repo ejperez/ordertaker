@@ -84,6 +84,15 @@ store payment QR image and configure customer instructions. The QR image is
 served from the public `/uploads/` static-file mount and shown during checkout.
 Unpaid QR orders cannot enter the kitchen; COD orders can proceed while unpaid.
 
+The API also serves authenticated Socket.IO connections at
+`/api/admin/socket.io`. Owner connections require a valid admin session cookie;
+customer connections require the private tracking token and can join only that
+order's room. New orders, order/payment status changes, and persisted messages
+are broadcast to the authorized rooms. The customer tracking page and owner
+dashboard support order-linked messages. REST remains the source of truth:
+clients refetch on socket reconnect and periodically poll while the connection
+is unavailable.
+
 `npm run build`, `npm run lint`, and `npm run format:check` provide local
 quality checks.
 

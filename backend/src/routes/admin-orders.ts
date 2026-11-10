@@ -4,6 +4,7 @@ import type { FastifyPluginAsync } from 'fastify';
 import { hasValidOrigin, requireOwner } from '../auth.js';
 import { prisma } from '../db.js';
 import { ImageValidationError, imageStorage } from '../services/image-storage.js';
+import { publishNewMessage, publishOrderUpdated } from '../realtime.js';
 
 const orderStatuses = Object.values(OrderStatus);
 const paymentStatuses = Object.values(PaymentStatus);
@@ -14,6 +15,7 @@ const filtersSchema = z.object({
   from: z.string().datetime({ offset: true }).optional(),
   to: z.string().datetime({ offset: true }).optional(),
 });
+const messageSchema = z.object({ message: z.string().trim().min(1).max(2000) });
 const statusSchema = z.object({
   status: z.enum(orderStatuses),
   note: z.string().trim().max(500).optional(),
@@ -120,6 +122,42 @@ export const adminOrderRoutes: FastifyPluginAsync = async (app) => {
     });
     if (!order) return reply.code(404).send({ error: 'Order not found' });
     return order;
+  });
+
+  app.get<{ Params: { id: string } }>('/orders/:id/messages', async (request, reply) => {
+    const order = await prisma.order.findUnique({
+      where: { id: request.params.id },
+      select: { id: true },
+    });
+    if (!order) return reply.code(404).send({ error: 'Order not found' });
+    return prisma.message.findMany({
+      where: { orderId: order.id },
+      orderBy: { createdAt: 'asc' },
+      take: 200,
+    });
+  });
+
+  app.post<{ Params: { id: string } }>('/orders/:id/messages', async (request, reply) => {
+    const parsed = messageSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.code(400).send({ error: 'Invalid message', details: parsed.error.issues });
+    }
+    const order = await prisma.order.findUnique({
+      where: { id: request.params.id },
+      select: { id: true },
+    });
+    if (!order) return reply.code(404).send({ error: 'Order not found' });
+
+    const message = await prisma.message.create({
+      data: {
+        orderId: order.id,
+        senderType: 'OWNER',
+        senderName: request.owner!.name,
+        message: parsed.data.message,
+      },
+    });
+    publishNewMessage(order.id, message);
+    return reply.code(201).send(message);
   });
 
   app.get<{ Params: { id: string } }>('/orders/:id/payment-proof', async (request, reply) => {
@@ -239,6 +277,11 @@ export const adminOrderRoutes: FastifyPluginAsync = async (app) => {
           .code(409)
           .send({ error: 'Payment status changed concurrently. Refresh and retry.' });
       }
+      if (result.payment) {
+        publishOrderUpdated(request.params.id, 'payment:updated', {
+          status: result.payment.status,
+        });
+      }
       return result.payment;
     } catch (error) {
       if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2034') {
@@ -330,6 +373,11 @@ export const adminOrderRoutes: FastifyPluginAsync = async (app) => {
         return reply
           .code(409)
           .send({ error: 'Order status changed concurrently. Refresh and retry.' });
+      }
+      if (updated.order) {
+        publishOrderUpdated(updated.order.id, 'order:updated', {
+          status: updated.order.status,
+        });
       }
       return updated.order;
     } catch (error) {

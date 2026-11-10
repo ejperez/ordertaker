@@ -6,6 +6,9 @@ const attempts = new Map<string, { count: number; resetAt: number }>();
 const orderWindowMs = 10 * 60 * 1000;
 const maxOrderAttempts = 10;
 const orderAttempts = new Map<string, { count: number; resetAt: number }>();
+const messageWindowMs = 10 * 60 * 1000;
+const maxMessageAttempts = 30;
+const messageAttempts = new Map<string, { count: number; resetAt: number }>();
 
 function consumeAttempt(
   request: FastifyRequest,
@@ -38,4 +41,8 @@ export function consumeLoginAttempt(request: FastifyRequest): number {
 
 export function consumeOrderAttempt(request: FastifyRequest): number {
   return consumeAttempt(request, orderAttempts, maxOrderAttempts, orderWindowMs);
+}
+
+export function consumeMessageAttempt(request: FastifyRequest): number {
+  return consumeAttempt(request, messageAttempts, maxMessageAttempts, messageWindowMs);
 }

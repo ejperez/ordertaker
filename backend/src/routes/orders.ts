@@ -3,8 +3,9 @@ import { Prisma } from '@prisma/client';
 import { z } from 'zod';
 import type { FastifyPluginAsync, FastifyReply } from 'fastify';
 import { prisma } from '../db.js';
-import { consumeOrderAttempt } from '../rate-limit.js';
+import { consumeMessageAttempt, consumeOrderAttempt } from '../rate-limit.js';
 import { ImageValidationError, imageStorage } from '../services/image-storage.js';
+import { publishNewMessage, publishOrderCreated, publishOrderUpdated } from '../realtime.js';
 
 const checkoutSchema = z
   .object({
@@ -85,6 +86,7 @@ const paymentResubmissionSchema = z.object({
   referenceNumber: z.string().trim().max(100).optional(),
   paymentReceipt: z.object({ data: z.string().min(1).max(7_000_000) }),
 });
+const customerMessageSchema = z.object({ message: z.string().trim().min(1).max(2000) });
 
 type CheckoutData = z.infer<typeof checkoutSchema>;
 
@@ -200,6 +202,59 @@ export const orderRoutes: FastifyPluginAsync = async (app) => {
     };
   });
 
+  app.get<{ Params: { token: string } }>(
+    '/orders/track/:token/messages',
+    async (request, reply) => {
+      if (!/^[A-Za-z0-9_-]{43}$/.test(request.params.token)) {
+        return reply.code(404).send({ error: 'Order not found' });
+      }
+      const order = await prisma.order.findUnique({
+        where: { trackingTokenHash: hashValue(request.params.token) },
+        select: { id: true },
+      });
+      if (!order) return reply.code(404).send({ error: 'Order not found' });
+      return prisma.message.findMany({
+        where: { orderId: order.id },
+        orderBy: { createdAt: 'asc' },
+        take: 200,
+      });
+    },
+  );
+
+  app.post<{ Params: { token: string } }>(
+    '/orders/track/:token/messages',
+    async (request, reply) => {
+      if (!/^[A-Za-z0-9_-]{43}$/.test(request.params.token)) {
+        return reply.code(404).send({ error: 'Order not found' });
+      }
+      const retryAfter = consumeMessageAttempt(request);
+      if (retryAfter > 0) {
+        reply.header('Retry-After', String(retryAfter));
+        return reply.code(429).send({ error: 'Too many messages. Try again later.' });
+      }
+      const parsed = customerMessageSchema.safeParse(request.body);
+      if (!parsed.success) {
+        return reply.code(400).send({ error: 'Invalid message', details: parsed.error.issues });
+      }
+      const order = await prisma.order.findUnique({
+        where: { trackingTokenHash: hashValue(request.params.token) },
+        select: { id: true, customerName: true },
+      });
+      if (!order) return reply.code(404).send({ error: 'Order not found' });
+
+      const message = await prisma.message.create({
+        data: {
+          orderId: order.id,
+          senderType: 'CUSTOMER',
+          senderName: order.customerName,
+          message: parsed.data.message,
+        },
+      });
+      publishNewMessage(order.id, message);
+      return reply.code(201).send(message);
+    },
+  );
+
   app.post<{ Params: { token: string } }>(
     '/orders/track/:token/payment',
     { bodyLimit: 7_200_000 },
@@ -233,7 +288,7 @@ export const orderRoutes: FastifyPluginAsync = async (app) => {
                 method: 'QR',
                 order: { trackingTokenHash: hashValue(request.params.token) },
               },
-              select: { id: true, status: true, proofImagePath: true },
+              select: { id: true, orderId: true, status: true, proofImagePath: true },
             });
             if (!payment) return { kind: 'missing' as const };
             if (payment.status !== 'REJECTED') return { kind: 'invalid' as const };
@@ -260,7 +315,11 @@ export const orderRoutes: FastifyPluginAsync = async (app) => {
                 note: 'Customer submitted an updated receipt and optional reference number.',
               },
             });
-            return { kind: 'success' as const, previousProofPath: payment.proofImagePath };
+            return {
+              kind: 'success' as const,
+              orderId: payment.orderId,
+              previousProofPath: payment.proofImagePath,
+            };
           },
           { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
         );
@@ -277,6 +336,9 @@ export const orderRoutes: FastifyPluginAsync = async (app) => {
 
         committed = true;
         previousProofPath = result.previousProofPath;
+        publishOrderUpdated(result.orderId, 'payment:updated', {
+          status: 'AWAITING_VERIFICATION',
+        });
         if (previousProofPath) {
           try {
             await imageStorage.removePaymentProof(previousProofPath);
@@ -487,6 +549,7 @@ export const orderRoutes: FastifyPluginAsync = async (app) => {
         return unavailableReply(reply);
       }
       paymentProofPath = null;
+      publishOrderCreated(created.order.id, created.order.orderNumber);
 
       return reply.code(201).send({
         duplicate: false,
