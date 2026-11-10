@@ -19,6 +19,28 @@ const statusSchema = z.object({
   note: z.string().trim().max(500).optional(),
 });
 const qrImageSchema = z.object({ data: z.string().min(1).max(7_000_000) });
+const qrInstructionsSchema = z.object({ instructions: z.string().trim().max(1000) });
+const paymentReviewSchema = z
+  .object({
+    status: z.enum(['PAID', 'REJECTED']),
+    rejectionReason: z.string().trim().max(500).optional(),
+  })
+  .superRefine((data, context) => {
+    if (data.status === 'REJECTED' && !data.rejectionReason) {
+      context.addIssue({
+        code: 'custom',
+        path: ['rejectionReason'],
+        message: 'A reason is required when rejecting a payment',
+      });
+    }
+    if (data.status === 'PAID' && data.rejectionReason) {
+      context.addIssue({
+        code: 'custom',
+        path: ['rejectionReason'],
+        message: 'A rejection reason is only accepted when rejecting a payment',
+      });
+    }
+  });
 
 const validTransitions: Record<OrderStatus, OrderStatus[]> = {
   PENDING: ['IN_KITCHEN', 'CANCELLED'],
@@ -32,7 +54,21 @@ const validTransitions: Record<OrderStatus, OrderStatus[]> = {
 
 const orderInclude = {
   items: { orderBy: { createdAt: 'asc' as const } },
-  payment: { select: { method: true, status: true, amount: true } },
+  payment: {
+    select: {
+      method: true,
+      status: true,
+      amount: true,
+      referenceNumber: true,
+      rejectionReason: true,
+      verifiedAt: true,
+      verifiedBy: { select: { name: true } },
+      statusHistory: {
+        orderBy: { createdAt: 'asc' as const },
+        include: { changedBy: { select: { name: true } } },
+      },
+    },
+  },
   statusHistory: {
     orderBy: { createdAt: 'asc' as const },
     include: { changedBy: { select: { name: true } } },
@@ -105,6 +141,115 @@ export const adminOrderRoutes: FastifyPluginAsync = async (app) => {
       .send(proof.bytes);
   });
 
+  app.patch<{ Params: { id: string } }>('/orders/:id/payment', async (request, reply) => {
+    const parsed = paymentReviewSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply
+        .code(400)
+        .send({ error: 'Invalid payment review', details: parsed.error.issues });
+    }
+
+    try {
+      const result = await prisma.$transaction(
+        async (transaction) => {
+          const payment = await transaction.payment.findUnique({
+            where: { orderId: request.params.id },
+            select: { id: true, method: true, status: true },
+          });
+          if (!payment) return { kind: 'missing' as const };
+
+          const validQrReview =
+            payment.method === 'QR' &&
+            payment.status === 'AWAITING_VERIFICATION' &&
+            ['PAID', 'REJECTED'].includes(parsed.data.status);
+          const validCodCollection =
+            payment.method === 'COD' &&
+            payment.status === 'UNPAID' &&
+            parsed.data.status === 'PAID';
+          if (!validQrReview && !validCodCollection) {
+            return { kind: 'invalid' as const, method: payment.method, status: payment.status };
+          }
+
+          const updated = await transaction.payment.updateMany({
+            where: {
+              id: payment.id,
+              method: payment.method,
+              status: payment.status,
+            },
+            data: {
+              status: parsed.data.status,
+              verifiedAt: new Date(),
+              verifiedById: request.owner!.id,
+              rejectionReason:
+                parsed.data.status === 'REJECTED' ? parsed.data.rejectionReason : null,
+            },
+          });
+          if (updated.count !== 1) return { kind: 'conflict' as const };
+
+          await transaction.paymentStatusHistory.create({
+            data: {
+              paymentId: payment.id,
+              oldStatus: payment.status,
+              newStatus: parsed.data.status,
+              actorType: 'OWNER',
+              changedByUserId: request.owner!.id,
+              note:
+                parsed.data.status === 'REJECTED'
+                  ? parsed.data.rejectionReason
+                  : payment.method === 'COD'
+                    ? 'Cash payment collected.'
+                    : 'QR payment verified.',
+            },
+          });
+
+          return {
+            kind: 'success' as const,
+            payment: await transaction.payment.findUnique({
+              where: { id: payment.id },
+              select: {
+                method: true,
+                status: true,
+                amount: true,
+                referenceNumber: true,
+                rejectionReason: true,
+                verifiedAt: true,
+                verifiedBy: { select: { name: true } },
+                statusHistory: {
+                  orderBy: { createdAt: 'asc' },
+                  include: { changedBy: { select: { name: true } } },
+                },
+              },
+            }),
+          };
+        },
+        { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
+      );
+
+      if (result.kind === 'missing') return reply.code(404).send({ error: 'Payment not found' });
+      if (result.kind === 'invalid') {
+        return reply.code(409).send({
+          error:
+            result.method === 'QR'
+              ? `QR payment is ${result.status}; only awaiting payments can be reviewed`
+              : `COD payment is ${result.status}; only unpaid COD orders can be collected`,
+        });
+      }
+      if (result.kind === 'conflict') {
+        return reply
+          .code(409)
+          .send({ error: 'Payment status changed concurrently. Refresh and retry.' });
+      }
+      return result.payment;
+    } catch (error) {
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2034') {
+        return reply
+          .code(409)
+          .send({ error: 'Payment status changed concurrently. Refresh and retry.' });
+      }
+      throw error;
+    }
+  });
+
   app.patch<{ Params: { id: string } }>('/orders/:id/status', async (request, reply) => {
     const parsed = statusSchema.safeParse(request.body);
     if (!parsed.success) {
@@ -118,7 +263,13 @@ export const adminOrderRoutes: FastifyPluginAsync = async (app) => {
         async (transaction) => {
           const current = await transaction.order.findUnique({
             where: { id: request.params.id },
-            select: { id: true, status: true, fulfillmentType: true },
+            select: {
+              id: true,
+              status: true,
+              fulfillmentType: true,
+              paymentMethod: true,
+              payment: { select: { status: true } },
+            },
           });
           if (!current) return { kind: 'missing' as const };
           if (!validTransitions[current.status].includes(parsed.data.status)) {
@@ -129,6 +280,13 @@ export const adminOrderRoutes: FastifyPluginAsync = async (app) => {
             (parsed.data.status === 'READY_FOR_PICKUP' && current.fulfillmentType !== 'PICKUP')
           ) {
             return { kind: 'invalid' as const, current: current.status };
+          }
+          if (
+            parsed.data.status === 'IN_KITCHEN' &&
+            current.paymentMethod === 'QR' &&
+            current.payment?.status !== 'PAID'
+          ) {
+            return { kind: 'unpaid-qr' as const };
           }
 
           const update = await transaction.order.updateMany({
@@ -162,6 +320,11 @@ export const adminOrderRoutes: FastifyPluginAsync = async (app) => {
         return reply.code(409).send({
           error: `Cannot move order from ${updated.current} to ${parsed.data.status}`,
         });
+      }
+      if (updated.kind === 'unpaid-qr') {
+        return reply
+          .code(409)
+          .send({ error: 'QR payment must be verified before an order enters the kitchen' });
       }
       if (updated.kind === 'conflict') {
         return reply
@@ -235,5 +398,27 @@ export const adminOrderRoutes: FastifyPluginAsync = async (app) => {
       }
     }
     return { imagePath: null };
+  });
+
+  app.get('/settings/qr-instructions', async () => {
+    const setting = await prisma.storeSetting.findUnique({
+      where: { key: 'qr_payment_instructions' },
+    });
+    return { instructions: typeof setting?.value === 'string' ? setting.value : '' };
+  });
+
+  app.put('/settings/qr-instructions', async (request, reply) => {
+    const parsed = qrInstructionsSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply
+        .code(400)
+        .send({ error: 'Invalid QR payment instructions', details: parsed.error.issues });
+    }
+    await prisma.storeSetting.upsert({
+      where: { key: 'qr_payment_instructions' },
+      update: { value: parsed.data.instructions },
+      create: { key: 'qr_payment_instructions', value: parsed.data.instructions },
+    });
+    return { instructions: parsed.data.instructions };
   });
 };

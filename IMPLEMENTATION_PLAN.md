@@ -365,14 +365,14 @@ Support two methods initially:
 ### 6.2 QR payment with manual verification
 
 -   Display the store's configured QR payment image and instructions.
--   Customer submits a reference number if available.
+-   Customer submits a payment reference number if available.
 -   Allow customer to upload payment proof.
 -   Set payment status to `AWAITING_VERIFICATION`.
 -   Owner can view the proof and approve or reject the payment.
 -   On approval, record verifier and verification timestamp.
--   On rejection, retain the reason if provided and allow the customer
-    to follow the store's instructions for correction or another payment
-    attempt.
+-   On rejection, retain the reason and allow the customer to submit an
+    updated payment proof and, if available, reference number through the
+    secure tracking link.
 
 Suggested payment statuses:
 
@@ -387,9 +387,9 @@ REFUNDED
 Keep payment status separate from order status. For example, an order
 can be `IN_KITCHEN` while its COD payment is still `UNPAID`.
 
-For the POC, define whether QR orders may enter the kitchen before
-payment approval. Recommended default: require payment approval before
-processing, while allowing an owner override.
+QR orders must be approved before entering the kitchen. COD orders may
+enter the kitchen while payment is unpaid. There is no owner override for
+this rule.
 
 ### Future payment gateway integration
 
@@ -950,14 +950,14 @@ valid workflows, and customers can view their order status securely.
 
 ### Phase 5 --- Payment verification
 
--   [ ] Configure store QR payment instructions.
--   [ ] Implement payment-proof upload with private file access.
--   [ ] Implement reference-number submission.
--   [ ] Build the admin payment review screen.
--   [ ] Implement approve/reject actions and audit details.
--   [ ] Implement COD collection marking.
--   [ ] Display payment status to the customer.
--   [ ] Enforce the chosen rule for when QR orders may enter the
+-   [x] Configure store QR payment instructions.
+-   [x] Implement payment-proof upload with private file access.
+-   [x] Implement reference-number submission.
+-   [x] Build the admin payment review screen.
+-   [x] Implement approve/reject actions and audit details.
+-   [x] Implement COD collection marking.
+-   [x] Display payment status to the customer.
+-   [x] Enforce the chosen rule for when QR orders may enter the
     kitchen.
 
 **Done when:** the owner can verify QR payments manually and record COD

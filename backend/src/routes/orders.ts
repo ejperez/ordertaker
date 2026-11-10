@@ -21,6 +21,7 @@ const checkoutSchema = z
     street: z.string().trim().max(160).optional(),
     deliveryInstructions: z.string().trim().max(500).optional(),
     paymentMethod: z.enum(['COD', 'QR']),
+    referenceNumber: z.string().trim().max(100).optional(),
     paymentReceipt: z.object({ data: z.string().min(1).max(7_000_000) }).optional(),
     items: z
       .array(
@@ -71,7 +72,19 @@ const checkoutSchema = z
         message: 'A payment receipt is only accepted for QR payment',
       });
     }
+    if (data.paymentMethod === 'COD' && data.referenceNumber) {
+      context.addIssue({
+        code: 'custom',
+        path: ['referenceNumber'],
+        message: 'A payment reference number is only accepted for QR payment',
+      });
+    }
   });
+
+const paymentResubmissionSchema = z.object({
+  referenceNumber: z.string().trim().max(100).optional(),
+  paymentReceipt: z.object({ data: z.string().min(1).max(7_000_000) }),
+});
 
 type CheckoutData = z.infer<typeof checkoutSchema>;
 
@@ -138,7 +151,26 @@ export const orderRoutes: FastifyPluginAsync = async (app) => {
           select: { productName: true, quantity: true, unitPrice: true, lineTotal: true },
           orderBy: { createdAt: 'asc' },
         },
-        payment: { select: { method: true, status: true, amount: true } },
+        payment: {
+          select: {
+            method: true,
+            status: true,
+            amount: true,
+            referenceNumber: true,
+            rejectionReason: true,
+            verifiedAt: true,
+            statusHistory: {
+              select: {
+                oldStatus: true,
+                newStatus: true,
+                actorType: true,
+                note: true,
+                createdAt: true,
+              },
+              orderBy: { createdAt: 'asc' },
+            },
+          },
+        },
         statusHistory: {
           select: { oldStatus: true, newStatus: true, note: true, createdAt: true },
           orderBy: { createdAt: 'asc' },
@@ -167,6 +199,113 @@ export const orderRoutes: FastifyPluginAsync = async (app) => {
           : null,
     };
   });
+
+  app.post<{ Params: { token: string } }>(
+    '/orders/track/:token/payment',
+    { bodyLimit: 7_200_000 },
+    async (request, reply) => {
+      if (!/^[A-Za-z0-9_-]{43}$/.test(request.params.token)) {
+        return reply.code(404).send({ error: 'Order not found' });
+      }
+
+      const retryAfter = consumeOrderAttempt(request);
+      if (retryAfter > 0) {
+        reply.header('Retry-After', String(retryAfter));
+        return reply.code(429).send({ error: 'Too many payment attempts. Try again later.' });
+      }
+
+      const parsed = paymentResubmissionSchema.safeParse(request.body);
+      if (!parsed.success) {
+        return reply
+          .code(400)
+          .send({ error: 'Invalid payment resubmission', details: parsed.error.issues });
+      }
+
+      let newProofPath: string | null = null;
+      let previousProofPath: string | null = null;
+      let committed = false;
+      try {
+        newProofPath = await imageStorage.savePaymentProof(parsed.data.paymentReceipt.data);
+        const result = await prisma.$transaction(
+          async (transaction) => {
+            const payment = await transaction.payment.findFirst({
+              where: {
+                method: 'QR',
+                order: { trackingTokenHash: hashValue(request.params.token) },
+              },
+              select: { id: true, status: true, proofImagePath: true },
+            });
+            if (!payment) return { kind: 'missing' as const };
+            if (payment.status !== 'REJECTED') return { kind: 'invalid' as const };
+
+            const updated = await transaction.payment.updateMany({
+              where: { id: payment.id, method: 'QR', status: 'REJECTED' },
+              data: {
+                status: 'AWAITING_VERIFICATION',
+                referenceNumber: parsed.data.referenceNumber?.trim() || null,
+                proofImagePath: newProofPath,
+                verifiedAt: null,
+                verifiedById: null,
+                rejectionReason: null,
+              },
+            });
+            if (updated.count !== 1) return { kind: 'conflict' as const };
+
+            await transaction.paymentStatusHistory.create({
+              data: {
+                paymentId: payment.id,
+                oldStatus: 'REJECTED',
+                newStatus: 'AWAITING_VERIFICATION',
+                actorType: 'CUSTOMER',
+                note: 'Customer submitted an updated receipt and optional reference number.',
+              },
+            });
+            return { kind: 'success' as const, previousProofPath: payment.proofImagePath };
+          },
+          { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
+        );
+
+        if (result.kind === 'missing') return reply.code(404).send({ error: 'Order not found' });
+        if (result.kind === 'invalid') {
+          return reply.code(409).send({ error: 'Only rejected QR payments can be resubmitted' });
+        }
+        if (result.kind === 'conflict') {
+          return reply
+            .code(409)
+            .send({ error: 'Payment status changed concurrently. Refresh and retry.' });
+        }
+
+        committed = true;
+        previousProofPath = result.previousProofPath;
+        if (previousProofPath) {
+          try {
+            await imageStorage.removePaymentProof(previousProofPath);
+          } catch (error) {
+            request.log.error(error, 'Could not remove replaced payment receipt');
+          }
+        }
+        return { status: 'AWAITING_VERIFICATION' };
+      } catch (error) {
+        if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2034') {
+          return reply
+            .code(409)
+            .send({ error: 'Payment status changed concurrently. Refresh and retry.' });
+        }
+        if (error instanceof ImageValidationError) {
+          return reply.code(400).send({ error: error.message });
+        }
+        throw error;
+      } finally {
+        if (!committed && newProofPath) {
+          try {
+            await imageStorage.removePaymentProof(newProofPath);
+          } catch (error) {
+            request.log.error(error, 'Could not remove unclaimed payment receipt');
+          }
+        }
+      }
+    },
+  );
 
   app.post('/orders', { bodyLimit: 7_200_000 }, async (request, reply) => {
     const retryAfter = consumeOrderAttempt(request);
@@ -304,7 +443,19 @@ export const orderRoutes: FastifyPluginAsync = async (app) => {
                   method: data.paymentMethod,
                   status: paymentStatus,
                   amount: centsToDecimal(totalCents),
+                  referenceNumber:
+                    data.paymentMethod === 'QR' ? data.referenceNumber?.trim() || null : null,
                   proofImagePath: paymentProofPath,
+                  statusHistory: {
+                    create: {
+                      newStatus: paymentStatus,
+                      actorType: data.paymentMethod === 'QR' ? 'CUSTOMER' : 'SYSTEM',
+                      note:
+                        data.paymentMethod === 'QR'
+                          ? 'Customer submitted payment proof at checkout.'
+                          : 'Cash payment is due at delivery or pickup.',
+                    },
+                  },
                 },
               },
               statusHistory: { create: { newStatus: 'PENDING' } },

@@ -38,22 +38,29 @@ enum PaymentStatus {
   REFUNDED
 }
 
+enum PaymentActorType {
+  CUSTOMER
+  OWNER
+  SYSTEM
+}
+
 enum MessageSenderType {
   CUSTOMER
   OWNER
 }
 
 model User {
-  id                   String               @id @default(cuid())
-  name                 String
-  email                String               @unique
-  passwordHash         String               @map("password_hash")
-  role                 UserRole             @default(OWNER)
-  sessions             AdminSession[]
-  verifiedPayments     Payment[]            @relation("PaymentVerifier")
-  changedOrderStatuses OrderStatusHistory[] @relation("StatusChangedBy")
-  createdAt            DateTime             @default(now()) @map("created_at")
-  updatedAt            DateTime             @updatedAt @map("updated_at")
+  id                     String                 @id @default(cuid())
+  name                   String
+  email                  String                 @unique
+  passwordHash           String                 @map("password_hash")
+  role                   UserRole               @default(OWNER)
+  sessions               AdminSession[]
+  verifiedPayments       Payment[]              @relation("PaymentVerifier")
+  changedPaymentStatuses PaymentStatusHistory[] @relation("PaymentStatusChangedBy")
+  changedOrderStatuses   OrderStatusHistory[]   @relation("StatusChangedBy")
+  createdAt              DateTime               @default(now()) @map("created_at")
+  updatedAt              DateTime               @updatedAt @map("updated_at")
 
   @@map("users")
 }
@@ -149,24 +156,41 @@ model OrderItem {
 }
 
 model Payment {
-  id                String        @id @default(cuid())
-  orderId           String        @unique @map("order_id")
-  order             Order         @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  id                String                 @id @default(cuid())
+  orderId           String                 @unique @map("order_id")
+  order             Order                  @relation(fields: [orderId], references: [id], onDelete: Cascade)
   method            PaymentMethod
-  status            PaymentStatus @default(UNPAID)
-  amount            Decimal       @db.Decimal(10, 2)
-  referenceNumber   String?       @map("reference_number")
-  proofImagePath    String?       @map("proof_image_path")
-  providerReference String?       @map("provider_reference")
-  verifiedAt        DateTime?     @map("verified_at")
-  verifiedById      String?       @map("verified_by")
-  verifiedBy        User?         @relation("PaymentVerifier", fields: [verifiedById], references: [id], onDelete: SetNull)
-  rejectionReason   String?       @map("rejection_reason")
-  createdAt         DateTime      @default(now()) @map("created_at")
-  updatedAt         DateTime      @updatedAt @map("updated_at")
+  status            PaymentStatus          @default(UNPAID)
+  amount            Decimal                @db.Decimal(10, 2)
+  referenceNumber   String?                @map("reference_number")
+  proofImagePath    String?                @map("proof_image_path")
+  providerReference String?                @map("provider_reference")
+  verifiedAt        DateTime?              @map("verified_at")
+  verifiedById      String?                @map("verified_by")
+  verifiedBy        User?                  @relation("PaymentVerifier", fields: [verifiedById], references: [id], onDelete: SetNull)
+  statusHistory     PaymentStatusHistory[]
+  rejectionReason   String?                @map("rejection_reason")
+  createdAt         DateTime               @default(now()) @map("created_at")
+  updatedAt         DateTime               @updatedAt @map("updated_at")
 
   @@index([status, createdAt])
   @@map("payments")
+}
+
+model PaymentStatusHistory {
+  id              String           @id @default(cuid())
+  paymentId       String           @map("payment_id")
+  payment         Payment          @relation(fields: [paymentId], references: [id], onDelete: Cascade)
+  oldStatus       PaymentStatus?   @map("old_status")
+  newStatus       PaymentStatus    @map("new_status")
+  actorType       PaymentActorType @map("actor_type")
+  changedByUserId String?          @map("changed_by_user_id")
+  changedBy       User?            @relation("PaymentStatusChangedBy", fields: [changedByUserId], references: [id], onDelete: SetNull)
+  note            String?
+  createdAt       DateTime         @default(now()) @map("created_at")
+
+  @@index([paymentId, createdAt])
+  @@map("payment_status_histories")
 }
 
 model OrderStatusHistory {

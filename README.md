@@ -65,11 +65,14 @@ serializable transaction. Orders, items, payment records, and initial status
 history are committed together. Checkout uses a UUID `Idempotency-Key`; the
 database stores only its hash, and duplicate requests do not create another
 order. The tracking token is random and only its hash is stored.
-QR checkout requires a JPEG, PNG, or WebP payment-receipt image (up to 5 MB).
-Receipt files are stored under `backend/private/uploads/payment-proofs/`,
-outside the public static-file directory. The owner can view QR receipts in the
-order details panel through an authenticated endpoint; payment approval and
-rejection are planned for the payment-verification phase.
+QR checkout accepts an optional payment reference number and requires a JPEG,
+PNG, or WebP payment-receipt image (up to 5 MB). Receipt files are stored under
+`backend/private/uploads/payment-proofs/`, outside the public static-file
+directory, and served only through an authenticated owner endpoint. The owner
+can review and approve/reject QR payments or mark COD orders as collected; each
+payment status change records its actor, timestamp, and note. Customers can see
+payment status and rejection reasons through their secure tracking link and
+resubmit a rejected QR payment with an updated reference and receipt.
 
 Customers can track an order at the one-time `/track/:token` URL returned after
 checkout. The API stores only a hash of the tracking token and returns order
@@ -77,8 +80,9 @@ status history, fulfillment details, and an itemized total to its bearer. The
 owner dashboard at `/admin` includes a filterable order board with validated
 drag-and-drop and mobile status controls; each status update is recorded in
 order history. The QR payment tab lets the owner upload, replace, or remove the
-store payment QR image, which is served from the public `/uploads/` static-file
-mount and shown during QR checkout.
+store payment QR image and configure customer instructions. The QR image is
+served from the public `/uploads/` static-file mount and shown during checkout.
+Unpaid QR orders cannot enter the kitchen; COD orders can proceed while unpaid.
 
 `npm run build`, `npm run lint`, and `npm run format:check` provide local
 quality checks.

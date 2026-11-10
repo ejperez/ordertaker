@@ -38,6 +38,26 @@ type OrderStatus =
   | 'CANCELLED';
 type FulfillmentType = 'DELIVERY' | 'PICKUP';
 type PaymentStatus = 'UNPAID' | 'AWAITING_VERIFICATION' | 'PAID' | 'REJECTED' | 'REFUNDED';
+type PaymentActorType = 'CUSTOMER' | 'OWNER' | 'SYSTEM';
+type PaymentHistoryEntry = {
+  id: string;
+  oldStatus: PaymentStatus | null;
+  newStatus: PaymentStatus;
+  actorType: PaymentActorType;
+  note: string | null;
+  createdAt: string;
+  changedBy: { name: string } | null;
+};
+type PaymentDetails = {
+  method: 'COD' | 'QR';
+  status: PaymentStatus;
+  amount: string;
+  referenceNumber: string | null;
+  rejectionReason: string | null;
+  verifiedAt: string | null;
+  verifiedBy: { name: string } | null;
+  statusHistory: PaymentHistoryEntry[];
+};
 type ManagedOrder = {
   id: string;
   orderNumber: string;
@@ -61,7 +81,7 @@ type ManagedOrder = {
     unitPrice: string;
     lineTotal: string;
   }>;
-  payment: { method: 'COD' | 'QR'; status: PaymentStatus; amount: string } | null;
+  payment: PaymentDetails | null;
   statusHistory: Array<{
     id: string;
     oldStatus: OrderStatus | null;
@@ -71,8 +91,14 @@ type ManagedOrder = {
     changedBy: { name: string } | null;
   }>;
 };
-type TrackedOrder = Omit<ManagedOrder, 'id' | 'items' | 'statusHistory'> & {
+type TrackedPaymentHistoryEntry = Omit<PaymentHistoryEntry, 'id' | 'changedBy'>;
+type TrackedOrder = Omit<ManagedOrder, 'id' | 'items' | 'statusHistory' | 'payment'> & {
   items: Array<Omit<ManagedOrder['items'][number], 'id'>>;
+  payment:
+    | (Omit<PaymentDetails, 'verifiedBy' | 'statusHistory'> & {
+        statusHistory: TrackedPaymentHistoryEntry[];
+      })
+    | null;
   statusHistory: Array<{
     oldStatus: OrderStatus | null;
     newStatus: OrderStatus;
@@ -126,9 +152,16 @@ const paymentStatusLabels: Record<PaymentStatus, string> = {
   REFUNDED: 'Refunded',
 };
 
-function nextOrderStatuses(order: Pick<ManagedOrder, 'status' | 'fulfillmentType'>): OrderStatus[] {
+function nextOrderStatuses(
+  order: Pick<ManagedOrder, 'status' | 'fulfillmentType' | 'paymentMethod' | 'payment'>,
+): OrderStatus[] {
   const transitions: Record<OrderStatus, OrderStatus[]> = {
-    PENDING: ['IN_KITCHEN', 'CANCELLED'],
+    PENDING: [
+      ...(order.paymentMethod === 'COD' || order.payment?.status === 'PAID'
+        ? (['IN_KITCHEN'] as const)
+        : []),
+      'CANCELLED',
+    ],
     IN_KITCHEN: [
       ...(order.fulfillmentType === 'DELIVERY' ? ['OUT_FOR_DELIVERY' as const] : []),
       ...(order.fulfillmentType === 'PICKUP' ? ['READY_FOR_PICKUP' as const] : []),
@@ -431,6 +464,7 @@ function CheckoutPage({
   const [street, setStreet] = useState('');
   const [deliveryInstructions, setDeliveryInstructions] = useState('');
   const [paymentMethod, setPaymentMethod] = useState<'COD' | 'QR'>('COD');
+  const [referenceNumber, setReferenceNumber] = useState('');
   const [paymentReceipt, setPaymentReceipt] = useState<File | null>(null);
   const [result, setResult] = useState<OrderResult | null>(null);
   const idempotencyKey = useRef<string | null>(null);
@@ -473,6 +507,7 @@ function CheckoutPage({
           fulfillmentType,
           ...(fulfillmentType === 'DELIVERY' ? { block, lot, street, deliveryInstructions } : {}),
           paymentMethod,
+          ...(paymentMethod === 'QR' ? { referenceNumber } : {}),
           ...(paymentMethod === 'QR' && paymentReceipt
             ? { paymentReceipt: { data: await imageData(paymentReceipt) } }
             : {}),
@@ -805,6 +840,18 @@ function CheckoutPage({
                     {store.data?.qrPaymentInstructions ||
                       'The store has not configured QR payment instructions yet.'}
                     <label className="mt-4 block font-medium text-stone-800">
+                      Payment reference number (if available)
+                      <input
+                        className="mt-2 w-full rounded-lg border border-stone-300 bg-white px-3 py-2.5"
+                        maxLength={100}
+                        value={referenceNumber}
+                        onChange={(event) => setReferenceNumber(event.target.value)}
+                      />
+                      <span className="mt-1 block text-xs font-normal text-stone-500">
+                        Enter the transaction/reference number shown by your payment app.
+                      </span>
+                    </label>
+                    <label className="mt-4 block font-medium text-stone-800">
                       Payment receipt (required)
                       <input
                         className="mt-2 block w-full text-sm"
@@ -913,6 +960,10 @@ function TrackingLinkPage() {
     retry: false,
     enabled: /^[A-Za-z0-9_-]{43}$/.test(token),
   });
+  const store = useQuery({
+    queryKey: ['store'],
+    queryFn: () => apiRequest<StoreInfo>('/store'),
+  });
   if (!/^[A-Za-z0-9_-]{43}$/.test(token)) {
     return (
       <main className="mx-auto max-w-2xl px-6 py-20">
@@ -1018,10 +1069,123 @@ function TrackingLinkPage() {
               {' · '}
               {data.payment ? paymentStatusLabels[data.payment.status] : 'Pending'}
             </p>
+            {data.payment?.referenceNumber && (
+              <p className="mt-1 text-sm text-stone-600">
+                Reference: {data.payment.referenceNumber}
+              </p>
+            )}
+            {data.payment?.verifiedAt && (
+              <p className="mt-1 text-sm text-stone-600">
+                {data.payment.status === 'PAID' ? 'Verified' : 'Reviewed'}{' '}
+                {new Date(data.payment.verifiedAt).toLocaleString()}
+              </p>
+            )}
+            {data.payment?.rejectionReason && (
+              <p className="mt-2 rounded-lg bg-red-50 p-3 text-sm text-red-800">
+                Receipt not accepted: {data.payment.rejectionReason}
+              </p>
+            )}
+            {data.payment?.statusHistory.length ? (
+              <ol className="mt-3 space-y-2 border-l border-stone-200 pl-3">
+                {data.payment.statusHistory.map((entry, index) => (
+                  <li
+                    key={`${entry.newStatus}-${entry.createdAt}-${index}`}
+                    className="text-xs text-stone-500"
+                  >
+                    {paymentStatusLabels[entry.newStatus]} ·{' '}
+                    {new Date(entry.createdAt).toLocaleString()}
+                    {entry.note ? ` · ${entry.note}` : ''}
+                  </li>
+                ))}
+              </ol>
+            ) : null}
+            {data.payment?.method === 'QR' && data.payment.status === 'REJECTED' && (
+              <PaymentResubmission
+                token={token}
+                instructions={store.data?.qrPaymentInstructions ?? ''}
+              />
+            )}
           </div>
         </div>
       </section>
     </main>
+  );
+}
+
+function PaymentResubmission({ token, instructions }: { token: string; instructions: string }) {
+  const queryClient = useQueryClient();
+  const [referenceNumber, setReferenceNumber] = useState('');
+  const [receipt, setReceipt] = useState<File | null>(null);
+  const resubmit = useMutation({
+    mutationFn: async () => {
+      if (!receipt) throw new Error('Choose an updated payment receipt.');
+      if (receipt.size > 5 * 1024 * 1024) {
+        throw new Error('Choose a payment receipt image smaller than 5 MB.');
+      }
+      return apiRequest<{ status: PaymentStatus }>(
+        `/orders/track/${encodeURIComponent(token)}/payment`,
+        {
+          method: 'POST',
+          body: jsonBody({
+            referenceNumber,
+            paymentReceipt: { data: await imageData(receipt) },
+          }),
+        },
+      );
+    },
+    onSuccess: async () => {
+      setReceipt(null);
+      setReferenceNumber('');
+      await queryClient.invalidateQueries({ queryKey: ['tracked-order', token] });
+    },
+  });
+
+  function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    resubmit.mutate();
+  }
+
+  return (
+    <form className="mt-4 rounded-lg border border-red-200 bg-white p-3" onSubmit={submit}>
+      <h3 className="font-semibold text-stone-900">Submit an updated payment</h3>
+      {instructions && (
+        <p className="mt-1 whitespace-pre-wrap text-sm text-stone-600">{instructions}</p>
+      )}
+      <label className="mt-3 block text-sm font-medium text-stone-700">
+        New payment reference number (if available)
+        <input
+          className="mt-1 w-full rounded-lg border border-stone-300 px-3 py-2"
+          maxLength={100}
+          value={referenceNumber}
+          onChange={(event) => setReferenceNumber(event.target.value)}
+        />
+      </label>
+      <label className="mt-3 block text-sm font-medium text-stone-700">
+        Updated receipt image
+        <input
+          className="mt-1 block w-full text-sm"
+          type="file"
+          accept="image/jpeg,image/png,image/webp"
+          required
+          onChange={(event) => setReceipt(event.target.files?.[0] ?? null)}
+        />
+        <span className="mt-1 block text-xs font-normal text-stone-500">
+          JPEG, PNG, or WebP up to 5 MB. This receipt is stored privately.
+        </span>
+      </label>
+      <ErrorNotice error={resubmit.error} />
+      {resubmit.isSuccess && (
+        <p className="mt-3 text-sm text-emerald-800" role="status">
+          Updated receipt submitted. The store will review it shortly.
+        </p>
+      )}
+      <button
+        className="mt-3 rounded-lg bg-emerald-900 px-4 py-2 text-sm font-semibold text-white disabled:opacity-50"
+        disabled={resubmit.isPending}
+      >
+        {resubmit.isPending ? 'Submitting…' : 'Submit updated receipt'}
+      </button>
+    </form>
   );
 }
 
@@ -1247,6 +1411,54 @@ function OrderDetails({
           Payment: {order.payment?.method === 'QR' ? 'QR' : 'COD'} ·{' '}
           {order.payment ? paymentStatusLabels[order.payment.status] : 'Pending'}
         </p>
+        {order.payment?.referenceNumber && (
+          <p className="mt-1 text-sm text-stone-600">
+            Reference number: {order.payment.referenceNumber}
+          </p>
+        )}
+        {order.payment?.verifiedAt && (
+          <p className="mt-1 text-sm text-stone-600">
+            {order.payment.status === 'PAID' ? 'Verified/collected' : 'Reviewed'} by{' '}
+            {order.payment.verifiedBy?.name ?? 'owner'} on{' '}
+            {new Date(order.payment.verifiedAt).toLocaleString()}
+          </p>
+        )}
+        {order.payment?.rejectionReason && (
+          <p className="mt-2 rounded-lg bg-red-50 p-3 text-sm text-red-800">
+            Rejection reason: {order.payment.rejectionReason}
+          </p>
+        )}
+        {order.payment?.statusHistory.length ? (
+          <section className="mt-4">
+            <h3 className="font-semibold text-stone-900">Payment audit history</h3>
+            <ol className="mt-2 space-y-2">
+              {order.payment.statusHistory.map((entry) => (
+                <li key={entry.id} className="text-sm text-stone-600">
+                  <span className="font-medium text-stone-800">
+                    {paymentStatusLabels[entry.newStatus]}
+                  </span>
+                  {' · '}
+                  {entry.actorType === 'OWNER'
+                    ? (entry.changedBy?.name ?? 'Owner')
+                    : entry.actorType === 'CUSTOMER'
+                      ? 'Customer'
+                      : 'System'}
+                  {' · '}
+                  {new Date(entry.createdAt).toLocaleString()}
+                  {entry.note ? ` · ${entry.note}` : ''}
+                </li>
+              ))}
+            </ol>
+          </section>
+        ) : null}
+        {order.payment && <PaymentReviewControls order={order} onComplete={onClose} />}
+        {order.paymentMethod === 'QR' &&
+          order.payment?.status !== 'PAID' &&
+          order.status === 'PENDING' && (
+            <p className="mt-3 rounded-lg bg-amber-50 p-3 text-sm text-amber-900">
+              QR payment must be verified before this order can enter the kitchen.
+            </p>
+          )}
         {order.paymentMethod === 'QR' && (
           <section className="mt-4 rounded-lg border border-stone-200 bg-stone-50 p-4">
             <h3 className="font-semibold text-stone-900">Payment receipt</h3>
@@ -1307,6 +1519,83 @@ function OrderDetails({
         )}
       </section>
     </div>
+  );
+}
+
+function PaymentReviewControls({
+  order,
+  onComplete,
+}: {
+  order: ManagedOrder;
+  onComplete: () => void;
+}) {
+  const queryClient = useQueryClient();
+  const [rejectionReason, setRejectionReason] = useState('');
+  const review = useMutation({
+    mutationFn: ({ status, reason }: { status: 'PAID' | 'REJECTED'; reason?: string }) =>
+      apiRequest<PaymentDetails>(`/admin/orders/${order.id}/payment`, {
+        method: 'PATCH',
+        body: jsonBody({ status, ...(reason ? { rejectionReason: reason } : {}) }),
+      }),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ['admin-orders'] });
+      onComplete();
+    },
+  });
+  const canReviewQr =
+    order.payment?.method === 'QR' && order.payment.status === 'AWAITING_VERIFICATION';
+  const canCollectCod = order.payment?.method === 'COD' && order.payment.status === 'UNPAID';
+
+  if (!canReviewQr && !canCollectCod) return null;
+
+  return (
+    <section className="mt-4 rounded-lg border border-stone-200 p-4">
+      <h3 className="font-semibold text-stone-900">
+        {canReviewQr ? 'Review QR payment' : 'Cash collection'}
+      </h3>
+      {canReviewQr && (
+        <label className="mt-3 block text-sm font-medium text-stone-700">
+          Rejection reason (required to reject)
+          <textarea
+            className="mt-1.5 w-full rounded-lg border border-stone-300 px-3 py-2"
+            rows={2}
+            maxLength={500}
+            value={rejectionReason}
+            onChange={(event) => setRejectionReason(event.target.value)}
+          />
+        </label>
+      )}
+      <ErrorNotice error={review.error} />
+      <div className="mt-3 flex flex-wrap gap-2">
+        {canReviewQr && (
+          <>
+            <button
+              className="rounded-lg bg-emerald-900 px-4 py-2 text-sm font-semibold text-white disabled:opacity-50"
+              disabled={review.isPending}
+              onClick={() => review.mutate({ status: 'PAID' })}
+            >
+              Approve payment
+            </button>
+            <button
+              className="rounded-lg border border-red-300 px-4 py-2 text-sm font-semibold text-red-800 disabled:opacity-50"
+              disabled={review.isPending || !rejectionReason.trim()}
+              onClick={() => review.mutate({ status: 'REJECTED', reason: rejectionReason.trim() })}
+            >
+              Reject payment
+            </button>
+          </>
+        )}
+        {canCollectCod && (
+          <button
+            className="rounded-lg bg-emerald-900 px-4 py-2 text-sm font-semibold text-white disabled:opacity-50"
+            disabled={review.isPending}
+            onClick={() => review.mutate({ status: 'PAID' })}
+          >
+            Mark cash collected
+          </button>
+        )}
+      </div>
+    </section>
   );
 }
 
@@ -1449,12 +1738,130 @@ function AdminOrdersBoard() {
   );
 }
 
+function AdminPaymentsReview() {
+  const queryClient = useQueryClient();
+  const [paymentFilter, setPaymentFilter] = useState<PaymentStatus | ''>('AWAITING_VERIFICATION');
+  const [selectedOrder, setSelectedOrder] = useState<ManagedOrder | null>(null);
+  const queryString = paymentFilter ? `?paymentStatus=${paymentFilter}` : '';
+  const orders = useQuery({
+    queryKey: ['admin-orders', 'payment-review', paymentFilter],
+    queryFn: () => apiRequest<ManagedOrder[]>(`/admin/orders${queryString}`),
+  });
+  const updateStatus = useMutation({
+    mutationFn: ({ order, status }: { order: ManagedOrder; status: OrderStatus }) =>
+      apiRequest<ManagedOrder>(`/admin/orders/${order.id}/status`, {
+        method: 'PATCH',
+        body: jsonBody({ status }),
+      }),
+    onSuccess: async () => {
+      setSelectedOrder(null);
+      await queryClient.invalidateQueries({ queryKey: ['admin-orders'] });
+    },
+  });
+
+  return (
+    <section className="mt-5">
+      <div className="rounded-xl border border-stone-200 bg-white p-4">
+        <label className="block max-w-sm text-xs font-medium text-stone-600">
+          Payment status
+          <select
+            className="mt-1 block w-full rounded-lg border border-stone-300 bg-white p-2 text-sm"
+            value={paymentFilter}
+            onChange={(event) => setPaymentFilter(event.target.value as PaymentStatus | '')}
+          >
+            <option value="AWAITING_VERIFICATION">Awaiting QR verification</option>
+            <option value="UNPAID">Unpaid COD</option>
+            <option value="PAID">Paid / collected</option>
+            <option value="REJECTED">Rejected QR payments</option>
+            <option value="REFUNDED">Refunded</option>
+            <option value="">All payment statuses</option>
+          </select>
+        </label>
+      </div>
+      <ErrorNotice error={orders.error ?? updateStatus.error} />
+      {orders.isPending ? (
+        <p className="py-8 text-stone-600">Loading payments…</p>
+      ) : orders.data?.length ? (
+        <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+          {orders.data.map((order) => (
+            <article key={order.id} className="rounded-xl border border-stone-200 bg-white p-4">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <h2 className="font-bold text-stone-900">{order.orderNumber}</h2>
+                  <p className="mt-1 text-sm text-stone-700">{order.customerName}</p>
+                  <p className="text-sm text-stone-500">
+                    {order.payment?.method === 'QR' ? 'QR payment' : 'Cash on delivery / pickup'}
+                  </p>
+                </div>
+                <span className="rounded-full bg-stone-100 px-2.5 py-1 text-xs text-stone-700">
+                  {order.payment ? paymentStatusLabels[order.payment.status] : 'No payment'}
+                </span>
+              </div>
+              <p className="mt-3 font-semibold text-stone-900">{formatPrice(order.total)}</p>
+              {order.payment?.referenceNumber && (
+                <p className="mt-2 text-sm text-stone-600">
+                  Reference: {order.payment.referenceNumber}
+                </p>
+              )}
+              {order.payment?.verifiedAt && (
+                <p className="mt-1 text-xs text-stone-500">
+                  Reviewed {new Date(order.payment.verifiedAt).toLocaleString()}
+                  {order.payment.verifiedBy ? ` by ${order.payment.verifiedBy.name}` : ''}
+                </p>
+              )}
+              <button
+                className="mt-4 rounded-lg border border-stone-300 px-3 py-2 text-sm font-semibold text-emerald-900"
+                onClick={() => setSelectedOrder(order)}
+              >
+                Review payment
+              </button>
+            </article>
+          ))}
+        </div>
+      ) : (
+        <p className="mt-4 rounded-xl border border-dashed border-stone-300 bg-white p-8 text-center text-stone-600">
+          No payments match this filter.
+        </p>
+      )}
+      {selectedOrder && (
+        <OrderDetails
+          key={selectedOrder.id}
+          order={selectedOrder}
+          onClose={() => setSelectedOrder(null)}
+          onStatusChange={(order, status) => updateStatus.mutate({ order, status })}
+        />
+      )}
+    </section>
+  );
+}
+
 function QrImageSettings() {
   const queryClient = useQueryClient();
   const [imageFile, setImageFile] = useState<File | null>(null);
+  const [instructionsText, setInstructionsText] = useState('');
   const image = useQuery({
     queryKey: ['admin-qr-image'],
     queryFn: () => apiRequest<{ imagePath: string | null }>('/admin/settings/qr-image'),
+  });
+  const instructions = useQuery({
+    queryKey: ['admin-qr-instructions'],
+    queryFn: () => apiRequest<{ instructions: string }>('/admin/settings/qr-instructions'),
+  });
+  useEffect(() => {
+    if (instructions.data) setInstructionsText(instructions.data.instructions);
+  }, [instructions.data]);
+  const saveInstructions = useMutation({
+    mutationFn: () =>
+      apiRequest<{ instructions: string }>('/admin/settings/qr-instructions', {
+        method: 'PUT',
+        body: jsonBody({ instructions: instructionsText }),
+      }),
+    onSuccess: async () => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ['admin-qr-instructions'] }),
+        queryClient.invalidateQueries({ queryKey: ['store'] }),
+      ]);
+    },
   });
   const upload = useMutation({
     mutationFn: async () => {
@@ -1489,7 +1896,33 @@ function QrImageSettings() {
         This image is displayed to customers when they choose QR payment. Use only a payment QR for
         the store account.
       </p>
-      <ErrorNotice error={image.error ?? upload.error ?? remove.error} />
+      <ErrorNotice
+        error={
+          image.error ??
+          instructions.error ??
+          upload.error ??
+          remove.error ??
+          saveInstructions.error
+        }
+      />
+      <label className="mt-4 block text-sm font-medium text-stone-700">
+        Customer payment instructions
+        <textarea
+          className="mt-1.5 w-full rounded-lg border border-stone-300 px-3 py-2.5"
+          rows={4}
+          maxLength={1000}
+          value={instructionsText}
+          onChange={(event) => setInstructionsText(event.target.value)}
+          placeholder="Add instructions for customers paying by QR."
+        />
+      </label>
+      <button
+        className="mt-3 rounded-lg border border-stone-300 px-4 py-2 text-sm font-semibold text-stone-700 disabled:opacity-50"
+        disabled={saveInstructions.isPending || instructions.isPending}
+        onClick={() => saveInstructions.mutate()}
+      >
+        {saveInstructions.isPending ? 'Saving instructions…' : 'Save instructions'}
+      </button>
       {image.data?.imagePath ? (
         <img
           className="mt-4 max-h-72 max-w-full rounded-lg border border-stone-200 object-contain"
@@ -1839,7 +2272,9 @@ function CategoryEditor({ category, onClose }: { category: Category | null; onCl
 
 function AdminDashboard({ owner }: { owner: Owner }) {
   const queryClient = useQueryClient();
-  const [section, setSection] = useState<'orders' | 'products' | 'categories' | 'qr'>('orders');
+  const [section, setSection] = useState<'orders' | 'payments' | 'products' | 'categories' | 'qr'>(
+    'orders',
+  );
   const [editingProduct, setEditingProduct] = useState<Product | null | undefined>(undefined);
   const [editingCategory, setEditingCategory] = useState<Category | null | undefined>(undefined);
   const [showArchived, setShowArchived] = useState(false);
@@ -1921,7 +2356,15 @@ function AdminDashboard({ owner }: { owner: Owner }) {
             <p className="text-sm font-semibold uppercase tracking-[0.16em] text-emerald-800">
               Store management
             </p>
-            <h1 className="mt-2 text-3xl font-semibold text-stone-900">Your menu</h1>
+            <h1 className="mt-2 text-3xl font-semibold text-stone-900">
+              {section === 'orders'
+                ? 'Orders'
+                : section === 'payments'
+                  ? 'Payment review'
+                  : section === 'qr'
+                    ? 'QR payment settings'
+                    : 'Your menu'}
+            </h1>
           </div>
           {section === 'products' ? (
             <button
@@ -1942,7 +2385,7 @@ function AdminDashboard({ owner }: { owner: Owner }) {
         </div>
 
         <nav className="mt-7 flex gap-2 border-b border-stone-200" aria-label="Admin sections">
-          {(['orders', 'products', 'categories', 'qr'] as const).map((item) => (
+          {(['orders', 'payments', 'products', 'categories', 'qr'] as const).map((item) => (
             <button
               key={item}
               className={`border-b-2 px-4 py-3 text-sm font-semibold capitalize ${
@@ -1952,7 +2395,7 @@ function AdminDashboard({ owner }: { owner: Owner }) {
               }`}
               onClick={() => setSection(item)}
             >
-              {item === 'qr' ? 'QR payment' : item}
+              {item === 'qr' ? 'QR payment' : item === 'payments' ? 'Payments' : item}
             </button>
           ))}
         </nav>
@@ -1961,6 +2404,8 @@ function AdminDashboard({ owner }: { owner: Owner }) {
           <ErrorNotice error={logout.error ?? categories.error} />
           {section === 'orders' ? (
             <AdminOrdersBoard />
+          ) : section === 'payments' ? (
+            <AdminPaymentsReview />
           ) : section === 'qr' ? (
             <QrImageSettings />
           ) : section === 'products' ? (
