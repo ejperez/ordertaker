@@ -982,22 +982,26 @@ disconnect.
 
 ### Phase 7 --- Testing, deployment, and handover
 
--   [ ] Test guest checkout for both fulfillment types.
--   [ ] Test all valid and invalid status transitions.
--   [ ] Test price and delivery-fee calculations.
--   [ ] Test payment approval/rejection and COD collection.
--   [ ] Test tracking-token authorization and attempts to access another
+-   [x] Test guest checkout for both fulfillment types.
+-   [x] Test all valid and invalid status transitions.
+-   [x] Test price and delivery-fee calculations.
+-   [x] Test payment approval/rejection and COD collection.
+-   [x] Test tracking-token authorization and attempts to access another
     order.
--   [ ] Test upload validation and private payment-proof access.
--   [ ] Test admin route and socket authorization.
+-   [x] Test upload validation and private payment-proof access.
+-   [x] Test admin route and socket authorization.
 -   [ ] Test mobile layouts and common error/empty/loading states.
 -   [ ] Configure production environment variables and HTTPS.
 -   [ ] Configure database and upload backups.
--   [ ] Document setup, migrations, seed process, deployment, and owner
+-   [x] Document setup, migrations, seed process, deployment, and owner
     usage.
 
 **Done when:** the application is deployed, the owner can operate it,
 and critical security and ordering flows have been tested.
+
+Deployment, HTTPS provisioning, automated backup scheduling, and the manual
+mobile/browser acceptance pass remain pending until a hosting provider is
+selected and those environment-specific steps are completed.
 
 ------------------------------------------------------------------------
 

@@ -93,9 +93,99 @@ dashboard support order-linked messages. REST remains the source of truth:
 clients refetch on socket reconnect and periodically poll while the connection
 is unavailable.
 
-`npm run build`, `npm run lint`, and `npm run format:check` provide local
-quality checks.
+`npm test` runs backend route and authorization tests using mocked persistence;
+it does not require a running PostgreSQL server. The suite covers delivery and
+pickup checkout with COD and QR, server-side totals and delivery fees, order
+status transitions and payment rules, tracking-token isolation, private receipt
+access, image validation, admin routes, and Socket.IO authentication.
+`npm run build`, `npm run lint`, and `npm run format:check` provide additional
+local quality checks.
 
 The seed command requires `OWNER_NAME`, `OWNER_EMAIL`, and `OWNER_PASSWORD` in
 `.env`. No owner credentials are committed to the project. Seed data can be run
-repeatedly without duplicating records.
+repeatedly without duplicating records; on an existing production database, be
+aware that seeding updates the owner password and starter products.
+
+## Production deployment
+
+No hosting provider is assumed by this repository. Before deploying, choose a
+provider that supplies PostgreSQL and persistent application storage, and
+configure the following values through its secret/environment settings:
+
+- `NODE_ENV=production`
+- `DATABASE_URL` for the production PostgreSQL database, using the provider's
+  required TLS options and a least-privilege application role
+- `API_HOST` and `API_PORT` for the provider's network interface
+- `FRONTEND_ORIGIN=https://<public-storefront-host>` (the API rejects an
+  insecure frontend origin in production)
+- `VITE_API_URL=https://<public-api-host>` when building the frontend
+- `OWNER_NAME`, `OWNER_EMAIL`, and a unique `OWNER_PASSWORD` of at least 12
+  characters for the initial seed only
+
+Terminate HTTPS at the platform or reverse proxy for both the storefront and
+API. Configure it to forward Socket.IO/WebSocket upgrades for
+`/api/admin/socket.io`, allow the exact storefront origin, and preserve
+credentials/cookies. The admin cookie is marked `Secure` in production.
+Run a single backend instance unless shared Socket.IO, database, and upload
+storage are configured for multiple instances.
+
+From a clean deployment checkout, install the locked dependencies, generate
+the Prisma client, apply committed migrations, build, and start the backend:
+
+```powershell
+npm ci
+npm run db:generate
+npm run db:deploy
+npm run build
+npm run start -w @ordertaker/backend
+```
+
+Build the frontend with `VITE_API_URL` set to the HTTPS API URL and publish
+`frontend/dist` using the selected static hosting provider. Run `npm run
+db:seed` once for a new database, after setting the owner seed values; do not
+run it as a routine deployment because it updates the owner password and
+starter-product fields. Do not use the development-only `npm run db:migrate`
+command in production.
+
+The backend stores product/QR images under `backend/public/uploads/` and
+private payment proofs under `backend/private/uploads/`. Mount persistent
+storage for both directories; the private directory must not be served as
+static content. Schedule encrypted, access-controlled backups of the database
+and both upload directories, retain multiple restore points, and periodically
+test restoring them together. For a Windows host with PostgreSQL client tools,
+one manual backup sequence is:
+
+```powershell
+$backup = "C:\backups\ordertaker\$(Get-Date -Format yyyyMMdd-HHmmss)"
+New-Item -ItemType Directory -Force $backup | Out-Null
+pg_dump --dbname="$env:DATABASE_URL" --format=custom --file "$backup\database.dump"
+New-Item -ItemType Directory -Force "backend\private\uploads" | Out-Null
+Compress-Archive -Path "backend\public\uploads","backend\private\uploads" -DestinationPath "$backup\uploads.zip"
+```
+
+Keep the backup destination outside the application tree and protect it with
+the same access controls as the database credentials. To restore, stop writes,
+restore the database dump with `pg_restore --no-owner --clean --if-exists`,
+restore the matching upload archive to the corresponding public and private
+directories, verify file permissions, and then restart the application.
+Adapt the commands and scheduling to the selected host; backups are not
+automatically configured by this repository.
+
+## Owner handover and acceptance
+
+Before opening the store, set a unique owner password before the initial seed
+and sign in at `/admin`. The application has no password-change screen, so
+establish an approved account/password rotation procedure before handover.
+Verify the store QR image and payment instructions, pickup address/instructions,
+delivery fee, product availability, and a full test order. Remove test orders
+and disable or rotate any temporary credentials before accepting customer
+orders.
+
+Complete a manual responsive/browser acceptance pass at narrow phone, tablet,
+and desktop widths. Check empty menu/cart/order states, loading indicators,
+validation and API errors, offline/reconnect behavior, guest checkout, tracking,
+owner payment review, and mobile order-status controls. Also verify the
+production health endpoint, HTTPS cookies, WebSocket upgrade, migration
+completion, and a database-plus-uploads restore before handover. These
+provider-specific deployment and manual acceptance steps remain outstanding
+until completed in the chosen hosting environment.

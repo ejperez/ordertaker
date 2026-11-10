@@ -6,8 +6,11 @@
     "dev": "tsx watch src/server.ts",
     "build": "tsc -p tsconfig.json",
     "start": "node dist/server.js",
+    "test": "npm run test:types && node --import tsx --import ./test/test-env.ts --test --test-concurrency=1 ./test/phase7.test.ts",
+    "test:types": "tsc -p test/tsconfig.json",
     "db:generate": "prisma generate",
     "db:migrate": "prisma migrate dev",
+    "db:deploy": "prisma migrate deploy",
     "db:seed": "tsx prisma/seed.ts"
   },
   "dependencies": {
@@ -26,6 +29,7 @@
     "@types/node": "^22.16.5",
     "@types/pg": "^8.16.0",
     "prisma": "^7.10.1",
+    "socket.io-client": "^4.8.4",
     "tsx": "^4.20.3",
     "typescript": "^5.8.3"
   }

@@ -12,8 +12,10 @@
     "lint": "eslint .",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
+    "test": "npm run test -w @ordertaker/backend",
     "db:generate": "npm run db:generate -w @ordertaker/backend",
     "db:migrate": "npm run db:migrate -w @ordertaker/backend",
+    "db:deploy": "npm run db:deploy -w @ordertaker/backend",
     "db:seed": "npm run db:seed -w @ordertaker/backend"
   },
   "devDependencies": {
