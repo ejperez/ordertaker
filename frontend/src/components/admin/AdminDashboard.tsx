@@ -74,79 +74,85 @@ export function AdminDashboard({ owner }: { owner: Owner }) {
   });
 
   return (
-    <>
-      <main className="min-h-screen w-full px-5 py-8 sm:px-8">
-        <header className="flex flex-wrap items-center justify-between gap-4 border-b border-stone-200 pb-5">
-          <div>
-            <Link to="/" className="text-xs font-bold uppercase tracking-[0.16em] text-emerald-900">
-              Neighborhood Coffee &amp; Pasta
-            </Link>
-            <p className="mt-1 text-sm text-stone-600">Signed in as {owner.name}</p>
-          </div>
-          <button
-            className="rounded-lg border border-stone-300 px-4 py-2 text-sm font-semibold text-stone-700"
+    <div className="flex min-h-screen w-full flex-col lg:flex-row">
+      <aside className="flex w-full shrink-0 flex-col border-b border-stone-200 bg-white p-5 sm:p-8 lg:min-h-screen lg:w-64 lg:border-b-0 lg:border-r">
+        <header className="mb-6">
+            <div>
+              <Link
+                to="/"
+                className="text-xs font-bold uppercase tracking-[0.16em] text-emerald-900"
+              >
+                Neighborhood Coffee &amp; Pasta
+              </Link>
+              <p className="mt-1 text-sm text-stone-600">Signed in as {owner.name}</p>
+            </div>
+        </header>
+        <nav className="flex flex-wrap gap-2 lg:flex-col" aria-label="Admin sections">
+            {(['orders', 'payments', 'products', 'categories', 'qr'] as const).map((item) => (
+              <button
+                key={item}
+                type="button"
+                aria-current={section === item ? 'page' : undefined}
+                className={`rounded-lg px-3 py-2 text-left text-sm font-semibold capitalize ${
+                  section === item
+                    ? 'bg-emerald-50 text-emerald-900'
+                    : 'text-stone-600 hover:bg-stone-100'
+                }`}
+                onClick={() => setSection(item)}
+              >
+                {item === 'qr' ? 'QR payment' : item === 'payments' ? 'Payments' : item}
+              </button>
+            ))}
+        </nav>
+        <button
+            type="button"
+            className="mt-5 rounded-lg border border-stone-300 px-3 py-2 text-left text-sm font-semibold text-stone-700 hover:bg-stone-50 lg:mt-auto"
             onClick={() => logout.mutate()}
             disabled={logout.isPending}
           >
             Sign out
-          </button>
-        </header>
-        {!realtimeConnected && (
-          <p className="mt-3 text-xs text-stone-500" role="status">
-            Live updates are reconnecting; order and payment lists will continue refreshing.
-          </p>
-        )}
+        </button>
+      </aside>
 
-        <div className="mt-8 flex flex-wrap items-end justify-between gap-5">
-          <div>
-            <p className="text-sm font-semibold uppercase tracking-[0.16em] text-emerald-800">
-              Store management
+      <main className="min-w-0 flex-1 px-5 py-8 sm:px-8">
+          {!realtimeConnected && (
+            <p className="mb-5 text-xs text-stone-500" role="status">
+              Live updates are reconnecting; order and payment lists will continue refreshing.
             </p>
-            <h1 className="mt-2 text-3xl font-semibold text-stone-900">
-              {section === 'orders'
-                ? 'Orders'
-                : section === 'payments'
-                  ? 'Payment review'
-                  : section === 'qr'
-                    ? 'QR payment settings'
-                    : 'Your menu'}
-            </h1>
+          )}
+          <div className="flex flex-wrap items-end justify-between gap-5">
+            <div>
+              <p className="text-sm font-semibold uppercase tracking-[0.16em] text-emerald-800">
+                Store management
+              </p>
+              <h1 className="mt-2 text-3xl font-semibold text-stone-900">
+                {section === 'orders'
+                  ? 'Orders'
+                  : section === 'payments'
+                    ? 'Payment review'
+                    : section === 'qr'
+                      ? 'QR payment settings'
+                      : 'Your menu'}
+              </h1>
+            </div>
+            {section === 'products' ? (
+              <button
+                className="rounded-lg bg-emerald-900 px-4 py-2.5 font-semibold text-white"
+                onClick={() => setEditingProduct(null)}
+                disabled={!categories.data?.length}
+              >
+                Add product
+              </button>
+            ) : section === 'categories' ? (
+              <button
+                className="rounded-lg bg-emerald-900 px-4 py-2.5 font-semibold text-white"
+                onClick={() => setEditingCategory(null)}
+              >
+                Add category
+              </button>
+            ) : null}
           </div>
-          {section === 'products' ? (
-            <button
-              className="rounded-lg bg-emerald-900 px-4 py-2.5 font-semibold text-white"
-              onClick={() => setEditingProduct(null)}
-              disabled={!categories.data?.length}
-            >
-              Add product
-            </button>
-          ) : section === 'categories' ? (
-            <button
-              className="rounded-lg bg-emerald-900 px-4 py-2.5 font-semibold text-white"
-              onClick={() => setEditingCategory(null)}
-            >
-              Add category
-            </button>
-          ) : null}
-        </div>
 
-        <nav className="mt-7 flex gap-2 border-b border-stone-200" aria-label="Admin sections">
-          {(['orders', 'payments', 'products', 'categories', 'qr'] as const).map((item) => (
-            <button
-              key={item}
-              className={`border-b-2 px-4 py-3 text-sm font-semibold capitalize ${
-                section === item
-                  ? 'border-emerald-900 text-emerald-900'
-                  : 'border-transparent text-stone-500'
-              }`}
-              onClick={() => setSection(item)}
-            >
-              {item === 'qr' ? 'QR payment' : item === 'payments' ? 'Payments' : item}
-            </button>
-          ))}
-        </nav>
-
-        <div className="mt-5">
           <ErrorNotice error={logout.error ?? categories.error} />
           {section === 'orders' ? (
             <AdminOrdersBoard />
@@ -301,7 +307,6 @@ export function AdminDashboard({ owner }: { owner: Owner }) {
               </div>
             </>
           )}
-        </div>
       </main>
       {editingProduct !== undefined && categories.data && (
         <ProductEditor
@@ -311,6 +316,6 @@ export function AdminDashboard({ owner }: { owner: Owner }) {
           onClose={() => setEditingProduct(undefined)}
         />
       )}
-    </>
+    </div>
   );
 }
