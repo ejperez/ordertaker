@@ -1,6 +1,7 @@
 @import 'tailwindcss';
 
 :root {
+  --bg-color: #f7f5f0;
   font-family:
     Inter,
     ui-sans-serif,
@@ -10,9 +11,13 @@
     'Segoe UI',
     sans-serif;
   color: #1c1917;
-  background: #f7f5f0;
+  background: var(--bg-color);
   font-synthesis: none;
   text-rendering: optimizeLegibility;
+}
+
+@theme {
+  --color-theme-bg: var(--bg-color);
 }
 
 body {

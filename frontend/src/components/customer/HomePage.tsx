@@ -45,20 +45,33 @@ export function HomePage({
       .filter((group) => group.products.length > 0) ?? [];
 
   return (
-    <main className="mx-auto min-h-screen max-w-6xl p-2">
-      <header className="flex items-center justify-between pb-4">
-        <Link to="/" className="text-sm font-bold uppercase tracking-[0.18em] text-emerald-900">
-          Ordertaker
-        </Link>
+    <main className="mx-auto min-h-screen max-w-6xl">
+      <header className="flex flex-col items-center justify-between pb-4">
+        <div className="w-full h-32 bg-[url('/bg-image.jpg')] bg-repeat bg-contain bg-fixed"></div>
+        <div className="w-full px-2">
+          <div className="flex gap-2 -mt-12 w-full bg-theme-bg shadow-[0_0_15px_-2px_rgba(0,0,0,0.2)] rounded-2xl p-2">
+            <img
+              className="h-20 w-20 object-contain rounded-2xl border"
+              src="/store-logo.jpg"
+              alt="Store logo"
+            />
+            <div>
+              <Link to="/" className="text-lg font-bold text-emerald-900">
+                Ordertaker
+              </Link>
+              <p className="text-sm opacity-70">Neighborhood coffee and pasta cafe</p>
+            </div>
+          </div>
+        </div>
       </header>
 
-      <section className={cartCount ? 'pb-14' : ''} aria-labelledby="menu-heading">
+      <section className={`${cartCount ? 'pb-14' : ''}`} aria-labelledby="menu-heading">
         <div
-          className="flex gap-2 overflow-x-auto min-w-0 snap-normal py-2"
+          className="px-2 bg-theme-bg sticky top-0 left-0 z-1 flex gap-2 overflow-x-auto min-w-0 snap-normal py-2 [scrollbar-width:none] [-ms-overflow-style:none] [&::-webkit-scrollbar]:hidden"
           aria-label="Filter menu by category"
         >
           <button
-            className={`rounded-full px-4 py-2 text-sm font-medium shrink-0 whitespace-nowrap ${
+            className={`rounded-full px-4 py-1 text-sm shrink-0 whitespace-nowrap ${
               categoryFilter === 'all'
                 ? 'bg-emerald-900 text-white'
                 : 'bg-white text-stone-700 ring-1 ring-stone-200'
@@ -70,7 +83,7 @@ export function HomePage({
           {categories.data?.map((category) => (
             <button
               key={category.id}
-              className={`rounded-full px-4 py-2 text-sm font-medium shrink-0 whitespace-nowrap ${
+              className={`rounded-full px-4 py-1 text-sm shrink-0 whitespace-nowrap ${
                 categoryFilter === category.id
                   ? 'bg-emerald-900 text-white'
                   : 'bg-white text-stone-700 ring-1 ring-stone-200'
@@ -87,12 +100,12 @@ export function HomePage({
         {products.isPending ? (
           <p className="py-12 text-stone-600">Loading the menu…</p>
         ) : visibleProducts.length ? (
-          <div className="mt-5 space-y-10">
+          <div className="p-2 mt-5 space-y-10">
             {productGroups.map(({ category, products: groupProducts }) => (
               <section key={category.id} aria-labelledby={`category-${category.id}`}>
                 <h3
                   id={`category-${category.id}`}
-                  className="mb-4 text-sm font-semibold text-stone-900"
+                  className="mb-4 text-md font-semibold text-stone-900"
                 >
                   {category.name.toUpperCase()}
                 </h3>
@@ -112,11 +125,11 @@ export function HomePage({
                             aria-hidden="true"
                           ></div>
                         )}
-                        <div className="absolute bottom-1 right-1 flex items-center justify-center gap-3">
+                        <div className="absolute bottom-2 right-2 flex items-center justify-center gap-3">
                           {cart.some((item) => item.productId === product.id) ? (
-                            <div className="flex items-center gap-2 text-sm bg-white/80 text-black rounded-2xl">
+                            <div className="flex items-center text-sm bg-white text-black rounded-2xl border border-emerald-900">
                               <button
-                                className="h-8 w-8"
+                                className="h-6 w-6"
                                 aria-label={`Decrease ${product.name} quantity`}
                                 onClick={() =>
                                   updateQuantity(
@@ -132,7 +145,7 @@ export function HomePage({
                                 {cart.find((item) => item.productId === product.id)?.quantity}
                               </span>
                               <button
-                                className="h-8 w-8"
+                                className="h-6 w-6"
                                 aria-label={`Increase ${product.name} quantity`}
                                 disabled={
                                   (cart.find((item) => item.productId === product.id)?.quantity ??
@@ -151,7 +164,7 @@ export function HomePage({
                             </div>
                           ) : (
                             <button
-                              className="rounded-full h-8 w-8 bg-emerald-900/80 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:bg-stone-300 border border-white"
+                              className="rounded-full h-6 w-6 bg-emerald-900 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:bg-stone-300"
                               disabled={!product.isAvailable}
                               onClick={() => addToCart(product.id)}
                             >
@@ -189,7 +202,7 @@ export function HomePage({
       </section>
 
       {cartCount > 0 && (
-        <footer className="fixed bottom-0 left-0 right-0 pb-[env(safe-area-inset-bottom)] bg-white p-2 rounded-t-2xl rounded-tr-2xl">
+        <footer className="fixed bottom-0 left-0 right-0 pb-[env(safe-area-inset-bottom)] bg-white p-2 rounded-t-2xl rounded-tr-2xl shadow-[0_-2px_4px_rgba(0,0,0,0.06)]">
           <div className="flex items-center">
             <Link
               to="/checkout"
