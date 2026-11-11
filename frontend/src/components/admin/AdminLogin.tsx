@@ -1,5 +1,5 @@
 import { useMutation } from '@tanstack/react-query';
-import { useState, type FormEvent } from 'react';
+import { useState, type SubmitEvent } from 'react';
 import { Link } from 'react-router-dom';
 import { apiRequest, jsonBody } from '../../api';
 import type { Owner } from '../../types';
@@ -17,7 +17,7 @@ export function AdminLogin({ onLogin }: { onLogin: (owner: Owner) => void }) {
     onSuccess: ({ user }) => onLogin(user),
   });
 
-  function submit(event: FormEvent<HTMLFormElement>) {
+  function submit(event: SubmitEvent<HTMLFormElement>) {
     event.preventDefault();
     login.mutate();
   }
