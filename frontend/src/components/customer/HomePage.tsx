@@ -48,7 +48,7 @@ export function HomePage({
     <main className="mx-auto min-h-screen max-w-6xl">
       <header className="flex flex-col items-center justify-between pb-4">
         <div className="w-full h-32 bg-[url('/bg-image.jpg')] bg-repeat bg-contain bg-fixed"></div>
-        <div className="w-full px-2">
+        <div className="w-full px-4">
           <div className="flex gap-2 -mt-12 w-full bg-theme-bg shadow-[0_0_15px_-2px_rgba(0,0,0,0.2)] rounded-2xl p-2">
             <img
               className="h-20 w-20 object-contain rounded-2xl border"
@@ -65,9 +65,9 @@ export function HomePage({
         </div>
       </header>
 
-      <section className={`${cartCount ? 'pb-14' : ''}`} aria-labelledby="menu-heading">
+      <section className={`${cartCount ? 'pb-18' : ''}`} aria-labelledby="menu-heading">
         <div
-          className="px-2 bg-theme-bg sticky top-0 left-0 z-1 flex gap-2 overflow-x-auto min-w-0 snap-normal py-2 [scrollbar-width:none] [-ms-overflow-style:none] [&::-webkit-scrollbar]:hidden"
+          className="px-4 bg-theme-bg sticky top-0 left-0 z-1 flex gap-2 overflow-x-auto min-w-0 snap-normal py-2 [scrollbar-width:none] [-ms-overflow-style:none] [&::-webkit-scrollbar]:hidden"
           aria-label="Filter menu by category"
         >
           <button
@@ -100,7 +100,7 @@ export function HomePage({
         {products.isPending ? (
           <p className="py-12 text-stone-600">Loading the menu…</p>
         ) : visibleProducts.length ? (
-          <div className="p-2 mt-5 space-y-10">
+          <div className="p-4 space-y-10">
             {productGroups.map(({ category, products: groupProducts }) => (
               <section key={category.id} aria-labelledby={`category-${category.id}`}>
                 <h3
@@ -202,11 +202,11 @@ export function HomePage({
       </section>
 
       {cartCount > 0 && (
-        <footer className="fixed bottom-0 left-0 right-0 pb-[env(safe-area-inset-bottom)] bg-white p-2 rounded-t-2xl rounded-tr-2xl shadow-[0_-2px_4px_rgba(0,0,0,0.06)]">
+        <footer className="fixed bottom-0 left-0 right-0 pb-[env(safe-area-inset-bottom)] bg-white p-4 rounded-t-2xl rounded-tr-2xl shadow-[0_-2px_4px_rgba(0,0,0,0.06)]">
           <div className="flex items-center">
             <Link
               to="/checkout"
-              className="mb-2 rounded-2xl bg-emerald-900 px-4 py-2 text-sm w-full text-center font-semibold text-white"
+              className="mb-2 rounded-full bg-emerald-900 px-4 py-3 w-full text-center font-semibold text-white"
             >
               <div className="flex justify-between">
                 <div>
