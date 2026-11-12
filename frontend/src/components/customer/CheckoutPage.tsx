@@ -108,7 +108,7 @@ export function CheckoutPage({
 
   if (result) {
     return (
-      <main className="mx-auto min-h-screen max-w-3xl px-5 py-10 sm:px-8">
+      <main className="mx-auto min-h-screen max-w-3xl p-2">
         <section className="rounded-2xl border border-stone-200 bg-white p-6 shadow-sm sm:p-9">
           <p className="text-sm font-semibold uppercase tracking-[0.16em] text-emerald-800">
             {result.duplicate ? 'Order already received' : 'Thank you for your order'}
@@ -177,16 +177,12 @@ export function CheckoutPage({
   }
 
   return (
-    <main className="mx-auto min-h-screen max-w-6xl px-5 py-8 sm:px-8">
-      <header className="flex flex-wrap items-center justify-between gap-4 border-b border-stone-200 pb-5">
-        <Link to="/" className="text-sm font-bold uppercase tracking-[0.18em] text-emerald-900">
-          Neighborhood Coffee &amp; Pasta
-        </Link>
+    <main className="mx-auto min-h-screen max-w-6xl">
+      <header className="sticky top-0 p-4 bg-white p-2">
         <Link to="/" className="text-sm font-semibold text-emerald-900">
-          ← Continue shopping
+          ← Back to menu
         </Link>
       </header>
-      <h1 className="mt-8 text-3xl font-semibold text-stone-900">Guest checkout</h1>
       {cartStorageError && <ErrorNotice error={new Error(cartStorageError)} />}
       <ErrorNotice error={products.error ?? store.error ?? submitOrder.error} />
       {cart.length === 0 ? (
@@ -197,30 +193,41 @@ export function CheckoutPage({
           </Link>
         </section>
       ) : (
-        <div className="mt-6 grid items-start gap-8 lg:grid-cols-[1fr_0.85fr]">
-          <div className="space-y-6">
-            <section className="rounded-xl border border-stone-200 bg-white p-5">
-              <h2 className="text-xl font-semibold text-stone-900">Your cart</h2>
+        <div className="mb-24 grid items-start gap-8 lg:grid-cols-[1fr_0.85fr]">
+          <div className="space-y-2">
+            <section className="p-4 bg-white">
+              <h2 className="text-md font-semibold text-stone-900">Order summary</h2>
               <div className="mt-4 divide-y divide-stone-100">
                 {cartProducts.map(({ line, product }) => (
                   <div
                     key={line.productId}
-                    className="flex flex-wrap items-center justify-between gap-3 py-4 first:pt-0 last:pb-0"
+                    className="flex flex-wrap items-start justify-between gap-3 py-4 first:pt-0 last:pb-0"
                   >
-                    <div className="min-w-36 flex-1">
-                      <p className="font-medium text-stone-900">
-                        {product?.name ?? 'Menu item unavailable'}
-                      </p>
-                      <p className="mt-1 text-sm text-stone-500">
-                        {product
-                          ? `${formatPrice(product.price)} each · ${formatPrice(Number(product.price) * line.quantity)}`
-                          : 'No longer on the menu'}
-                        {product && !product.isAvailable ? ' · Unavailable' : ''}
-                      </p>
+                    <div className="min-w-36 flex-1 text-sm">
+                      <div className="flex gap-2">
+                        {product && (
+                          <div>
+                            <img
+                              className="w-12 bg-stone-100 aspect-square rounded-md"
+                              src={`${apiUrl}${product.imagePath}`}
+                              alt={product.name}
+                            />
+                          </div>
+                        )}
+                        <div>
+                          <p className="text-stone-900">
+                            {product?.name ?? 'Menu item unavailable'}
+                          </p>
+                          <p className="mt-1 text-sm text-stone-500">
+                            {product ? formatPrice(product.price) : 'No longer on the menu'}
+                            {product && !product.isAvailable ? ' · Unavailable' : ''}
+                          </p>
+                        </div>
+                      </div>
                     </div>
-                    <div className="flex items-center gap-2">
+                    <div className="flex items-center text-xs border border-emerald-900 rounded-full">
                       <button
-                        className="h-8 w-8 rounded-full border border-stone-300"
+                        className="h-6 w-6 rounded-full"
                         aria-label={`Decrease ${product?.name ?? 'item'} quantity`}
                         onClick={() => updateQuantity(line.productId, line.quantity - 1)}
                       >
@@ -228,33 +235,23 @@ export function CheckoutPage({
                       </button>
                       <span className="min-w-5 text-center">{line.quantity}</span>
                       <button
-                        className="h-8 w-8 rounded-full border border-stone-300 disabled:opacity-40"
+                        className="h-6 w-6 rounded-full disabled:opacity-40"
                         aria-label={`Increase ${product?.name ?? 'item'} quantity`}
                         disabled={line.quantity >= 50}
                         onClick={() => updateQuantity(line.productId, line.quantity + 1)}
                       >
                         +
                       </button>
-                      <button
-                        className="ml-2 text-sm text-red-800 underline"
-                        onClick={() => removeFromCart(line.productId)}
-                      >
-                        Remove
-                      </button>
                     </div>
                   </div>
                 ))}
               </div>
-              <div className="mt-5 flex justify-between border-t border-stone-200 pt-4 font-semibold text-stone-900">
-                <span>Cart subtotal</span>
-                <span>{formatPrice(subtotal / 100)}</span>
-              </div>
             </section>
 
-            <form id="checkout-form" className="space-y-6" onSubmit={submit}>
-              <section className="rounded-xl border border-stone-200 bg-white p-5">
-                <h2 className="text-xl font-semibold text-stone-900">Contact details</h2>
-                <div className="mt-4 grid gap-4 sm:grid-cols-2">
+            <form id="checkout-form" className="space-y-2" onSubmit={submit}>
+              <section className="bg-white p-4">
+                <h2 className="font-semibold text-stone-900">Contact details</h2>
+                <div className="mt-4 grid gap-4 grid-cols-2">
                   <label className="text-sm font-medium text-stone-700">
                     Name
                     <input
@@ -281,9 +278,9 @@ export function CheckoutPage({
                 </div>
               </section>
 
-              <section className="rounded-xl border border-stone-200 bg-white p-5">
-                <h2 className="text-xl font-semibold text-stone-900">Delivery or pickup</h2>
-                <div className="mt-4 grid gap-3 sm:grid-cols-2">
+              <section className="bg-white p-4">
+                <h2 className="font-semibold text-stone-900">Delivery or pickup</h2>
+                <div className="mt-4 grid gap-3 grid-cols-2">
                   {(['DELIVERY', 'PICKUP'] as const).map((type) => (
                     <label
                       key={type}
@@ -308,7 +305,7 @@ export function CheckoutPage({
                   ))}
                 </div>
                 {fulfillmentType === 'DELIVERY' ? (
-                  <div className="mt-4 grid gap-4 sm:grid-cols-2">
+                  <div className="mt-4 grid gap-4 grid-cols-2">
                     <label className="text-sm font-medium text-stone-700">
                       Block
                       <input
@@ -361,7 +358,7 @@ export function CheckoutPage({
               </section>
 
               <section className="rounded-xl border border-stone-200 bg-white p-5">
-                <h2 className="text-xl font-semibold text-stone-900">Payment</h2>
+                <h2 className="font-semibold text-stone-900">Payment</h2>
                 <div className="mt-4 grid gap-3 sm:grid-cols-2">
                   {(
                     [
@@ -390,7 +387,7 @@ export function CheckoutPage({
                   ))}
                 </div>
                 {paymentMethod === 'QR' && (
-                  <div className="mt-4 rounded-lg bg-stone-50 p-4 text-sm leading-6 text-stone-700">
+                  <div className="flex flex-col text-center justify-center items-center mt-4 rounded-lg bg-stone-50 p-4 text-sm leading-6 text-stone-700">
                     <img
                       className="mb-3 w-56 max-w-full rounded-lg bg-white object-contain"
                       src={
@@ -411,22 +408,10 @@ export function CheckoutPage({
                     )}
                     {store.data?.qrPaymentInstructions ||
                       'The store has not configured QR payment instructions yet.'}
-                    <label className="mt-4 block font-medium text-stone-800">
-                      Payment reference number (if available)
-                      <input
-                        className="mt-2 w-full rounded-lg border border-stone-300 bg-white px-3 py-2.5"
-                        maxLength={100}
-                        value={referenceNumber}
-                        onChange={(event) => setReferenceNumber(event.target.value)}
-                      />
-                      <span className="mt-1 block text-xs font-normal text-stone-500">
-                        Enter the transaction/reference number shown by your payment app.
-                      </span>
-                    </label>
-                    <label className="mt-4 block font-medium text-stone-800">
+                    <label className="mt-4 block font-medium text-stone-800 text-left">
                       Payment receipt (required)
                       <input
-                        className="mt-2 block w-full text-sm"
+                        className="mt-2 block w-full text-sm border border-emerald-800 bg-emerald-50 rounded-lg p-4"
                         type="file"
                         accept="image/jpeg,image/png,image/webp"
                         required
@@ -443,53 +428,13 @@ export function CheckoutPage({
             </form>
           </div>
 
-          <aside className="rounded-xl border border-stone-200 bg-white p-5 lg:sticky lg:top-6">
-            <h2 className="text-xl font-semibold text-stone-900">Order review</h2>
-            <dl className="mt-4 space-y-3 text-sm">
-              <div className="flex justify-between gap-4 text-stone-600">
-                <dt>Subtotal</dt>
-                <dd>{formatPrice(subtotal / 100)}</dd>
-              </div>
-              <div className="flex justify-between gap-4 text-stone-600">
-                <dt>Fulfillment</dt>
-                <dd>{fulfillmentType === 'DELIVERY' ? 'Delivery' : 'Pickup'}</dd>
-              </div>
-              <div className="flex justify-between gap-4 text-stone-600">
-                <dt>{fulfillmentType === 'DELIVERY' ? 'Delivery fee' : 'Pickup fee'}</dt>
-                <dd>{formatPrice(deliveryFee / 100)}</dd>
-              </div>
-              <div className="flex justify-between gap-4 border-t border-stone-200 pt-3 text-base font-semibold text-stone-900">
+          <aside className="fixed bottom-0 left-0 right-0 pb-[env(safe-area-inset-bottom)] bg-white px-4 py-4 rounded-t-2xl rounded-tr-2xl shadow-[0_-2px_4px_rgba(0,0,0,0.06)]">
+            <dl className="text-sm">
+              <div className="flex justify-between gap-4 text-base text-stone-900">
                 <dt>Total</dt>
                 <dd>{formatPrice((subtotal + deliveryFee) / 100)}</dd>
               </div>
             </dl>
-            {customerName.trim() && (
-              <div className="mt-5 border-t border-stone-200 pt-4 text-sm text-stone-600">
-                <p className="font-semibold text-stone-900">Contact</p>
-                <p>{customerName}</p>
-                <p>{customerPhone}</p>
-              </div>
-            )}
-            {fulfillmentType === 'DELIVERY' && (block.trim() || lot.trim()) && (
-              <div className="mt-4 text-sm text-stone-600">
-                <p className="font-semibold text-stone-900">Delivery address</p>
-                <p>
-                  {[block.trim() && `Block ${block}`, lot.trim() && `Lot ${lot}`, street.trim()]
-                    .filter(Boolean)
-                    .join(', ')}
-                </p>
-                {deliveryInstructions.trim() && <p>{deliveryInstructions}</p>}
-              </div>
-            )}
-            {fulfillmentType === 'PICKUP' && (
-              <div className="mt-4 text-sm text-stone-600">
-                <p className="font-semibold text-stone-900">Pickup location</p>
-                <p>{store.data?.pickupAddress || 'Not configured'}</p>
-              </div>
-            )}
-            <p className="mt-4 text-sm text-stone-600">
-              Payment: {paymentMethod === 'COD' ? 'Cash on delivery / pickup' : 'QR payment'}
-            </p>
             {hasUnavailableItems && (
               <p className="mt-4 rounded-lg bg-amber-50 p-3 text-sm text-amber-900" role="alert">
                 Remove unavailable items or refresh the menu before placing your order.
@@ -500,11 +445,8 @@ export function CheckoutPage({
                 <ErrorNotice error={submitOrder.error} />
               </div>
             )}
-            <p className="mt-4 text-xs leading-5 text-stone-500">
-              Prices and availability are confirmed by the store when you place the order.
-            </p>
             <button
-              className="mt-4 w-full rounded-lg bg-emerald-900 px-4 py-3 font-semibold text-white disabled:cursor-not-allowed disabled:opacity-50"
+              className="mb-2 mt-2 w-full rounded-full bg-emerald-900 p-3 font-semibold text-white disabled:cursor-not-allowed disabled:opacity-50"
               type="submit"
               form="checkout-form"
               disabled={
