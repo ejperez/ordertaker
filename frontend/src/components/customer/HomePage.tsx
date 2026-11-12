@@ -5,6 +5,7 @@ import { apiRequest, apiUrl } from '../../api';
 import type { CartLine, Category, Product } from '../../types';
 import { formatPrice } from '../../utils';
 import { ErrorNotice } from '../shared/ErrorNotice';
+import type { StoreInfo } from '../../types';
 
 export function HomePage({
   cart,
@@ -17,6 +18,10 @@ export function HomePage({
   updateQuantity: (productId: string, quantity: number) => void;
   cartStorageError: string | null;
 }) {
+  const store = useQuery({
+    queryKey: ['store'],
+    queryFn: () => apiRequest<StoreInfo>('/store'),
+  });
   const categories = useQuery({
     queryKey: ['categories'],
     queryFn: () => apiRequest<Category[]>('/categories'),
@@ -57,9 +62,11 @@ export function HomePage({
             />
             <div>
               <Link to="/" className="text-lg font-bold text-emerald-900">
-                Ordertaker
+                {store ? store?.data?.name : 'Ordertaker'}
               </Link>
-              <p className="text-sm opacity-70">Neighborhood coffee and pasta cafe</p>
+              <p className="text-sm opacity-70">
+                {store ? store?.data?.pickupAddress : 'Neighborhood coffee and pasta cafe'}
+              </p>
             </div>
           </div>
         </div>

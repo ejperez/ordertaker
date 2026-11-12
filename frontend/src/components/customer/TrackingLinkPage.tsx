@@ -2,7 +2,12 @@ import { useQuery } from '@tanstack/react-query';
 import { Link, useParams } from 'react-router-dom';
 import { apiRequest } from '../../api';
 import type { StoreInfo, TrackedOrder } from '../../types';
-import { formatPrice, orderStatusLabels, paymentStatusLabels, useCustomerRealtime } from '../../utils';
+import {
+  formatPrice,
+  orderStatusLabels,
+  paymentStatusLabels,
+  useCustomerRealtime,
+} from '../../utils';
 import { ErrorNotice } from '../shared/ErrorNotice';
 import { OrderMessages } from '../shared/OrderMessages';
 import { PaymentResubmission } from '../shared/PaymentResubmission';
@@ -46,7 +51,7 @@ export function TrackingLinkPage() {
     <main className="mx-auto min-h-screen max-w-3xl px-5 py-10 sm:px-8">
       <header className="flex items-center justify-between border-b border-stone-200 pb-5">
         <Link to="/" className="text-sm font-bold uppercase tracking-[0.16em] text-emerald-900">
-          Neighborhood Coffee &amp; Pasta
+          {store ? store?.data?.name : 'Ordertaker'}
         </Link>
         <span className="text-sm text-stone-500">Order tracking</span>
       </header>

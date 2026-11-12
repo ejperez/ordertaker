@@ -9,7 +9,6 @@ import { ErrorNotice } from '../shared/ErrorNotice';
 export function CheckoutPage({
   cart,
   updateQuantity,
-  removeFromCart,
   onOrderPlaced,
   cartStorageError,
 }: {
@@ -36,7 +35,6 @@ export function CheckoutPage({
   const [street, setStreet] = useState('');
   const [deliveryInstructions, setDeliveryInstructions] = useState('');
   const [paymentMethod, setPaymentMethod] = useState<'COD' | 'QR'>('COD');
-  const [referenceNumber, setReferenceNumber] = useState('');
   const [paymentReceipt, setPaymentReceipt] = useState<File | null>(null);
   const [result, setResult] = useState<OrderResult | null>(null);
   const idempotencyKey = useRef<string | null>(null);
@@ -79,7 +77,6 @@ export function CheckoutPage({
           fulfillmentType,
           ...(fulfillmentType === 'DELIVERY' ? { block, lot, street, deliveryInstructions } : {}),
           paymentMethod,
-          ...(paymentMethod === 'QR' ? { referenceNumber } : {}),
           ...(paymentMethod === 'QR' && paymentReceipt
             ? { paymentReceipt: { data: await imageData(paymentReceipt) } }
             : {}),
@@ -326,7 +323,7 @@ export function CheckoutPage({
                         onChange={(event) => setLot(event.target.value)}
                       />
                     </label>
-                    <label className="text-sm font-medium text-stone-700 sm:col-span-2">
+                    <label className="text-sm font-medium text-stone-700 col-span-2">
                       Street or phase (optional)
                       <input
                         className="mt-1.5 w-full rounded-lg border border-stone-300 px-3 py-2.5"
@@ -335,7 +332,7 @@ export function CheckoutPage({
                         onChange={(event) => setStreet(event.target.value)}
                       />
                     </label>
-                    <label className="text-sm font-medium text-stone-700 sm:col-span-2">
+                    <label className="text-sm font-medium text-stone-700 col-span-2">
                       Delivery instructions or landmarks (optional)
                       <textarea
                         className="mt-1.5 w-full rounded-lg border border-stone-300 px-3 py-2.5"
@@ -363,7 +360,7 @@ export function CheckoutPage({
                   {(
                     [
                       ['COD', 'Cash on delivery / pickup'],
-                      ['QR', 'QR payment'],
+                      ['QR', 'QR payment (GCash, Maya, Bank)'],
                     ] as const
                   ).map(([method, label]) => (
                     <label

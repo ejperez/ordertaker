@@ -44,7 +44,7 @@ export const catalogRoutes: FastifyPluginAsync = async (app) => {
     }
 
     return {
-      name: stringSetting('store_name', 'Neighborhood Coffee & Pasta'),
+      name: stringSetting('store_name', 'Ordertaker'),
       pickupAddress: stringSetting('pickup_address'),
       pickupInstructions: stringSetting('pickup_instructions'),
       deliveryFee,

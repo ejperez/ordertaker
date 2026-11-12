@@ -75,7 +75,7 @@ async function seed() {
     }
 
     const settings = [
-      ['store_name', 'Neighborhood Coffee & Pasta'],
+      ['store_name', 'Ordertaker'],
       ['pickup_address', 'Add your store address in the database before opening orders.'],
       ['pickup_instructions', 'Please wait for confirmation before picking up your order.'],
       ['delivery_fee', 0],
