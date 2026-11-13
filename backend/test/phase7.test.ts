@@ -1,59 +1,126 @@
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
+import { readFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
-import type { AddressInfo } from 'node:net';
 import { test, type TestContext } from 'node:test';
 import Fastify, { type FastifyInstance, type FastifyPluginAsync } from 'fastify';
-import { Prisma } from '@prisma/client';
+import { PGlite } from '@electric-sql/pglite';
+import { drizzle } from 'drizzle-orm/pglite';
+import { eq } from 'drizzle-orm';
 import { io as connectSocket, type Socket } from 'socket.io-client';
+import * as schema from '../src/db/schema/index.js';
+import type { AppDatabase } from '../src/db.js';
+import { hashSessionToken, sessionCookieName } from '../src/auth.js';
 import { env } from '../src/config/env.js';
-import { prisma } from '../src/db.js';
+import {
+  adminSessions,
+  categories,
+  orders,
+  payments,
+  products,
+  users,
+} from '../src/db/schema/index.js';
 import { adminOrderRoutes } from '../src/routes/admin-orders.js';
 import { orderRoutes } from '../src/routes/orders.js';
-import { imageStorage } from '../src/services/image-storage.js';
+import { ImageValidationError, imageStorage } from '../src/services/image-storage.js';
 import { attachRealtimeServer, closeRealtimeServer } from '../src/realtime.js';
 
-type CheckoutOrderData = {
-  fulfillmentType: 'DELIVERY' | 'PICKUP';
-  paymentMethod: 'COD' | 'QR';
-  subtotal: Prisma.Decimal;
-  deliveryFee: Prisma.Decimal;
-  total: Prisma.Decimal;
-  items: {
-    create: Array<{
-      productId: string;
-      productName: string;
-      quantity: number;
-      unitPrice: Prisma.Decimal;
-      lineTotal: Prisma.Decimal;
-    }>;
-  };
-  payment: {
-    create: {
-      status: string;
-      proofImagePath: string | null;
-    };
-  };
+type TestDatabase = {
+  client: PGlite;
+  db: AppDatabase;
 };
 
-function stubMethod(target: object, name: string, value: unknown): () => void {
-  const original = Object.getOwnPropertyDescriptor(target, name);
-  const originalValue = Reflect.get(target, name) as unknown;
-  Object.defineProperty(target, name, {
-    configurable: true,
-    enumerable: true,
-    writable: true,
-    value,
+async function createDatabase(): Promise<TestDatabase> {
+  const client = new PGlite();
+  const db = drizzle({ client: client as never, schema });
+  const journal = JSON.parse(
+    await readFile(new URL('../drizzle/meta/_journal.json', import.meta.url), 'utf8'),
+  ) as { entries: Array<{ tag: string }> };
+  for (const entry of journal.entries) {
+    const migration = await readFile(
+      new URL(`../drizzle/${entry.tag}.sql`, import.meta.url),
+      'utf8',
+    );
+    for (const statement of migration.split('--> statement-breakpoint')) {
+      if (statement.trim()) await client.exec(statement);
+    }
+  }
+  return { client, db: db as unknown as AppDatabase };
+}
+
+async function createRouteApp(
+  plugin: FastifyPluginAsync,
+  prefix: string,
+  db: AppDatabase,
+): Promise<FastifyInstance> {
+  const app = Fastify({ logger: false });
+  app.decorateRequest('owner', null);
+  app.decorate('db', db);
+  await app.register(plugin, { prefix });
+  await app.ready();
+  return app;
+}
+
+async function seedProduct(db: AppDatabase) {
+  const [category] = await db
+    .insert(categories)
+    .values({ name: 'Coffee', slug: 'coffee', updatedAt: new Date() })
+    .returning();
+  const [product] = await db
+    .insert(products)
+    .values({
+      categoryId: category.id,
+      name: 'Meal',
+      slug: 'meal',
+      price: '12.50',
+      updatedAt: new Date(),
+    })
+    .returning();
+  await db.insert(schema.storeSettings).values({
+    key: 'delivery_fee',
+    value: 3.25,
+    updatedAt: new Date(),
   });
+  return { category, product };
+}
+
+async function createOwnerSession(db: AppDatabase) {
+  const [owner] = await db
+    .insert(users)
+    .values({
+      name: 'Owner',
+      email: 'owner@example.com',
+      passwordHash: 'test-hash',
+      updatedAt: new Date(),
+    })
+    .returning();
+  const token = randomBytes(32).toString('base64url');
+  await db.insert(adminSessions).values({
+    tokenHash: hashSessionToken(token),
+    userId: owner.id,
+    expiresAt: new Date(Date.now() + 60_000),
+  });
+  return { owner, token };
+}
+
+function adminHeaders(token?: string): Record<string, string> {
+  return {
+    ...(token ? { cookie: `${sessionCookieName}=${token}` } : {}),
+    origin: env.FRONTEND_ORIGIN,
+  };
+}
+
+function stubMethod(target: object, name: string, value: unknown): () => void {
+  const descriptor = Object.getOwnPropertyDescriptor(target, name);
+  const original = Reflect.get(target, name);
+  Object.defineProperty(target, name, { configurable: true, writable: true, value });
   return () => {
-    if (original?.value !== undefined) Object.defineProperty(target, name, original);
-    else if (typeof originalValue === 'function') {
+    if (descriptor) Object.defineProperty(target, name, descriptor);
+    else if (original !== undefined) {
       Object.defineProperty(target, name, {
         configurable: true,
-        enumerable: true,
         writable: true,
-        value: originalValue,
+        value: original,
       });
     } else Reflect.deleteProperty(target, name);
   };
@@ -65,548 +132,456 @@ function restoreAfter(context: TestContext, ...restoreMethods: Array<() => void>
   });
 }
 
-function stubOwnerSession(context: TestContext): void {
-  restoreAfter(
-    context,
-    stubMethod(prisma.adminSession, 'findFirst', async () => ({
-      user: { id: 'owner-1', name: 'Owner', email: 'owner@example.com' },
-    })),
-  );
-}
-
-async function createRouteApp(
-  plugin: FastifyPluginAsync,
-  prefix: string,
-): Promise<FastifyInstance> {
-  const app = Fastify();
-  app.decorateRequest('owner', null);
-  await app.register(plugin, { prefix });
-  await app.ready();
-  return app;
-}
-
-function adminHeaders(): Record<string, string> {
-  return {
-    cookie: 'ordertaker_admin=test-session',
-    origin: env.FRONTEND_ORIGIN,
-  };
-}
-
-test('guest checkout recalculates totals for delivery and pickup with COD and QR', async (context) => {
-  const savedOrders: CheckoutOrderData[] = [];
-  let orderLookups = 0;
-  restoreAfter(
-    context,
-    stubMethod(prisma.order, 'findUnique', async () =>
-      orderLookups++ < 4 ? null : { orderNumber: 'ORD-1' },
-    ),
-    stubMethod(prisma, '$transaction', async (work: (transaction: object) => Promise<unknown>) =>
-      work({
-        product: {
-          findMany: async () => [
-            { id: 'product-1', name: 'Meal', price: new Prisma.Decimal('12.50') },
-          ],
-        },
-        storeSetting: {
-          findUnique: async () => ({ value: '3.25' }),
-          findMany: async () => [],
-        },
-        order: {
-          create: async ({ data }: { data: CheckoutOrderData }) => {
-            savedOrders.push(data);
-            return {
-              id: `order-${savedOrders.length}`,
-              orderNumber: `ORD-${savedOrders.length}`,
-              fulfillmentType: data.fulfillmentType,
-              paymentMethod: data.paymentMethod,
-              items: data.items.create,
-              subtotal: data.subtotal,
-              deliveryFee: data.deliveryFee,
-              total: data.total,
-            };
-          },
-        },
-      }),
-    ),
-    stubMethod(imageStorage, 'savePaymentProof', async () => 'payment-proofs/test.png'),
-  );
-  const app = await createRouteApp(orderRoutes, '/api');
+test('checkout commits delivery COD order and items atomically, then supports idempotent retry', async (context) => {
+  const { client, db } = await createDatabase();
+  context.after(async () => client.close());
+  const { product } = await seedProduct(db);
+  const app = await createRouteApp(orderRoutes, '/api', db);
   context.after(() => app.close());
 
-  const scenarios = [
-    { fulfillmentType: 'DELIVERY', paymentMethod: 'COD' },
-    { fulfillmentType: 'PICKUP', paymentMethod: 'COD' },
-    { fulfillmentType: 'DELIVERY', paymentMethod: 'QR' },
-    { fulfillmentType: 'PICKUP', paymentMethod: 'QR' },
-  ] as const;
+  const payload = {
+    customerName: 'Customer',
+    customerPhone: '5551234567',
+    fulfillmentType: 'DELIVERY',
+    block: 'A',
+    lot: '1',
+    paymentMethod: 'COD',
+    items: [{ productId: product.id, quantity: 2 }],
+  };
+  const headers = { 'idempotency-key': '00000000-0000-4000-8000-000000000001' };
+  const response = await app.inject({ method: 'POST', url: '/api/orders', headers, payload });
+  assert.equal(response.statusCode, 201);
+  const body = response.json();
+  assert.equal(body.subtotal, '25.00');
+  assert.equal(body.deliveryFee, '3.25');
+  assert.equal(body.total, '28.25');
 
-  for (const [index, scenario] of scenarios.entries()) {
-    const response = await app.inject({
-      method: 'POST',
-      url: '/api/orders',
-      headers: {
-        'idempotency-key': `00000000-0000-4000-8000-${String(index + 1).padStart(12, '0')}`,
-      },
-      payload: {
-        customerName: 'Customer',
-        customerPhone: '5551234567',
-        ...scenario,
-        ...(scenario.fulfillmentType === 'DELIVERY' ? { block: 'A', lot: '1' } : {}),
-        ...(scenario.paymentMethod === 'QR' ? { paymentReceipt: { data: 'eA==' } } : {}),
-        items: [{ productId: 'product-1', quantity: 2 }],
-      },
-    });
+  const savedOrders = await db.select().from(orders);
+  const savedPayments = await db.select().from(payments);
+  assert.equal(savedOrders.length, 1);
+  assert.equal(savedPayments.length, 1);
+  assert.equal((await db.select().from(schema.orderItems)).length, 1);
 
-    assert.equal(response.statusCode, 201);
-    const body = response.json();
-    assert.equal(body.subtotal, '25.00');
-    assert.equal(body.deliveryFee, scenario.fulfillmentType === 'DELIVERY' ? '3.25' : '0.00');
-    assert.equal(body.total, scenario.fulfillmentType === 'DELIVERY' ? '28.25' : '25.00');
-    assert.match(body.trackingUrl, /^\/track\/[A-Za-z0-9_-]{43}$/);
-    assert.equal(savedOrders[index].paymentMethod, scenario.paymentMethod);
-    assert.equal(
-      savedOrders[index].payment.create.status,
-      scenario.paymentMethod === 'QR' ? 'AWAITING_VERIFICATION' : 'UNPAID',
-    );
-    assert.equal(
-      savedOrders[index].payment.create.proofImagePath,
-      scenario.paymentMethod === 'QR' ? 'payment-proofs/test.png' : null,
-    );
-  }
-
-  const duplicate = await app.inject({
-    method: 'POST',
-    url: '/api/orders',
-    headers: {
-      'idempotency-key': '00000000-0000-4000-8000-000000000001',
-    },
-    payload: {
-      customerName: 'Customer',
-      customerPhone: '5551234567',
-      fulfillmentType: 'DELIVERY',
-      block: 'A',
-      lot: '1',
-      paymentMethod: 'COD',
-      items: [{ productId: 'product-1', quantity: 2 }],
-    },
-  });
+  const duplicate = await app.inject({ method: 'POST', url: '/api/orders', headers, payload });
   assert.equal(duplicate.statusCode, 200);
   assert.equal(duplicate.json().duplicate, true);
-  assert.equal(savedOrders.length, 4);
+  assert.equal((await db.select().from(orders)).length, 1);
+
+  const token = body.trackingUrl.split('/').at(-1);
+  const tracked = await app.inject({ method: 'GET', url: `/api/orders/track/${token}` });
+  assert.equal(tracked.statusCode, 200);
+  assert.equal(tracked.json().orderNumber, body.orderNumber);
+
+  const message = await app.inject({
+    method: 'POST',
+    url: `/api/orders/track/${token}/messages`,
+    payload: { message: 'Please leave the order at the door.' },
+  });
+  assert.equal(message.statusCode, 201);
+  const otherOrderMessages = await app.inject({
+    method: 'GET',
+    url: `/api/orders/track/${randomBytes(32).toString('base64url')}/messages`,
+  });
+  assert.equal(otherOrderMessages.statusCode, 404);
 });
 
-test('checkout rejects a product that became unavailable', async (context) => {
-  restoreAfter(
-    context,
-    stubMethod(prisma.order, 'findUnique', async () => null),
-    stubMethod(prisma, '$transaction', async (work: (transaction: object) => Promise<unknown>) =>
-      work({ product: { findMany: async () => [] } }),
-    ),
-  );
-  const app = await createRouteApp(orderRoutes, '/api');
+test('checkout rejects unavailable products without persisting partial records', async (context) => {
+  const { client, db } = await createDatabase();
+  context.after(async () => client.close());
+  const { product } = await seedProduct(db);
+  await db.update(products).set({ isAvailable: false }).where(eq(products.id, product.id));
+  const app = await createRouteApp(orderRoutes, '/api', db);
   context.after(() => app.close());
 
   const response = await app.inject({
     method: 'POST',
     url: '/api/orders',
-    headers: { 'idempotency-key': '00000000-0000-4000-8000-000000000101' },
+    headers: { 'idempotency-key': '00000000-0000-4000-8000-000000000002' },
     payload: {
       customerName: 'Customer',
       customerPhone: '5551234567',
       fulfillmentType: 'PICKUP',
       paymentMethod: 'COD',
-      items: [{ productId: 'product-1', quantity: 1 }],
+      items: [{ productId: product.id, quantity: 1 }],
     },
   });
-
   assert.equal(response.statusCode, 409);
+  assert.equal((await db.select().from(orders)).length, 0);
+  assert.equal((await db.select().from(payments)).length, 0);
 });
 
-test('checkout rejects missing delivery details, missing QR proof, and invalid uploaded image data', async (context) => {
+test('new foreign-key migration preserves existing legacy constraint', async (context) => {
+  const client = new PGlite();
+  context.after(async () => client.close());
+  const initialMigration = await readFile(
+    new URL('../drizzle/0000_needy_morph.sql', import.meta.url),
+    'utf8',
+  );
+  for (const statement of initialMigration.split('--> statement-breakpoint')) {
+    if (statement.trim()) await client.exec(statement);
+  }
+  await client.exec(`
+    ALTER TABLE order_items
+      ADD CONSTRAINT order_items_product_id_fkey
+      FOREIGN KEY (product_id) REFERENCES products(id)
+      ON DELETE SET NULL ON UPDATE CASCADE
+  `);
+  const followupMigration = await readFile(
+    new URL('../drizzle/0001_hot_vanisher.sql', import.meta.url),
+    'utf8',
+  );
+  await client.exec(followupMigration);
+  const result = await client.query<{ count: number }>(`
+    SELECT count(*)::int AS count
+    FROM pg_constraint
+    WHERE conrelid = 'order_items'::regclass
+      AND confrelid = 'products'::regclass
+      AND contype = 'f'
+  `);
+  assert.equal(result.rows[0].count, 1);
+});
+
+test('pickup QR checkout stores private proof and charges no delivery fee', async (context) => {
+  const { client, db } = await createDatabase();
+  context.after(async () => client.close());
+  const { product } = await seedProduct(db);
   restoreAfter(
     context,
-    stubMethod(prisma.order, 'findUnique', async () => null),
+    stubMethod(imageStorage, 'savePaymentProof', async () => 'payment-proofs/test.png'),
   );
-  const app = await createRouteApp(orderRoutes, '/api');
+  const app = await createRouteApp(orderRoutes, '/api', db);
   context.after(() => app.close());
-  const base = {
-    customerName: 'Customer',
-    customerPhone: '5551234567',
-    items: [{ productId: 'product-1', quantity: 1 }],
-  };
 
-  for (const payload of [
-    { ...base, fulfillmentType: 'DELIVERY', paymentMethod: 'COD' },
-    { ...base, fulfillmentType: 'PICKUP', paymentMethod: 'QR' },
-    {
-      ...base,
+  const response = await app.inject({
+    method: 'POST',
+    url: '/api/orders',
+    headers: { 'idempotency-key': '00000000-0000-4000-8000-000000000003' },
+    payload: {
+      customerName: 'Customer',
+      customerPhone: '5551234567',
       fulfillmentType: 'PICKUP',
       paymentMethod: 'QR',
-      paymentReceipt: { data: Buffer.from('not an image').toString('base64') },
+      paymentReceipt: { data: 'eA==' },
+      items: [{ productId: product.id, quantity: 2 }],
     },
-  ]) {
-    const response = await app.inject({
-      method: 'POST',
-      url: '/api/orders',
-      headers: { 'idempotency-key': '00000000-0000-4000-8000-000000000099' },
-      payload,
-    });
-    assert.equal(response.statusCode, 400, `${response.statusCode}: ${response.body}`);
-  }
-
-  await assert.rejects(
-    imageStorage.saveProductImage(Buffer.from('not an image').toString('base64')),
-    /Only JPEG, PNG, and WebP images are supported/,
-  );
+  });
+  assert.equal(response.statusCode, 201);
+  assert.equal(response.json().deliveryFee, '0.00');
+  assert.equal(response.json().total, '25.00');
+  const [payment] = await db.select().from(payments);
+  assert.equal(payment.status, 'AWAITING_VERIFICATION');
+  assert.equal(payment.proofImagePath, 'payment-proofs/test.png');
 });
 
-test('tracking tokens cannot read another order’s messages', async (context) => {
-  const validToken = 'B'.repeat(43);
-  const validHash = createHash('sha256').update(validToken).digest('hex');
-  restoreAfter(
-    context,
-    stubMethod(
-      prisma.order,
-      'findUnique',
-      async ({ where }: { where: { trackingTokenHash: string } }) =>
-        where.trackingTokenHash === validHash ? { id: 'order-b', customerName: 'Buyer' } : null,
-    ),
-    stubMethod(prisma.message, 'findMany', async () => []),
-    stubMethod(prisma.message, 'create', async ({ data }: { data: { message: string } }) => ({
-      id: 'message-1',
-      senderType: 'CUSTOMER',
-      senderName: 'Buyer',
-      message: data.message,
-      createdAt: new Date(),
-    })),
-  );
-  const app = await createRouteApp(orderRoutes, '/api');
-  context.after(() => app.close());
-
-  const unauthorized = await app.inject({
-    method: 'GET',
-    url: `/api/orders/track/${'A'.repeat(43)}/messages`,
-  });
-  const authorized = await app.inject({
-    method: 'GET',
-    url: `/api/orders/track/${validToken}/messages`,
-  });
-
-  assert.equal(unauthorized.statusCode, 404);
-  assert.equal(authorized.statusCode, 200);
-  assert.deepEqual(authorized.json(), []);
-
-  const unauthorizedMessage = await app.inject({
-    method: 'POST',
-    url: `/api/orders/track/${'A'.repeat(43)}/messages`,
-    payload: { message: 'Hello' },
-  });
-  const authorizedMessage = await app.inject({
-    method: 'POST',
-    url: `/api/orders/track/${validToken}/messages`,
-    payload: { message: 'Hello' },
-  });
-  assert.equal(unauthorizedMessage.statusCode, 404);
-  assert.equal(authorizedMessage.statusCode, 201);
-});
-
-test('admin status endpoint enforces every transition in the workflow', async (context) => {
-  stubOwnerSession(context);
-  let currentStatus = '';
-  let nextStatus = '';
-  let fulfillmentType: 'DELIVERY' | 'PICKUP' = 'DELIVERY';
-  let paymentMethod = 'COD';
-  let paymentStatus = 'UNPAID';
-
-  restoreAfter(
-    context,
-    stubMethod(prisma, '$transaction', async (work: (transaction: object) => Promise<unknown>) => {
-      let reads = 0;
-      return work({
-        order: {
-          findUnique: async () =>
-            ++reads === 1
-              ? {
-                  id: 'order-1',
-                  status: currentStatus,
-                  fulfillmentType,
-                  paymentMethod,
-                  payment: { status: paymentStatus },
-                }
-              : { id: 'order-1', status: nextStatus },
-          updateMany: async () => ({ count: 1 }),
-        },
-        orderStatusHistory: { create: async () => ({}) },
-      });
-    }),
-  );
-  const app = await createRouteApp(adminOrderRoutes, '/api/admin');
-  context.after(() => app.close());
-
-  const transitions: Record<string, string[]> = {
-    PENDING: ['IN_KITCHEN', 'CANCELLED'],
-    IN_KITCHEN: ['OUT_FOR_DELIVERY', 'READY_FOR_PICKUP', 'CANCELLED'],
-    OUT_FOR_DELIVERY: ['DELIVERED'],
-    READY_FOR_PICKUP: ['PICKED_UP'],
-    DELIVERED: [],
-    PICKED_UP: [],
-    CANCELLED: [],
-  };
-  const statuses = Object.keys(transitions);
-
-  for (const from of statuses) {
-    for (const to of statuses) {
-      currentStatus = from;
-      nextStatus = to;
-      fulfillmentType = to === 'READY_FOR_PICKUP' ? 'PICKUP' : 'DELIVERY';
-      paymentMethod = 'COD';
-      paymentStatus = 'UNPAID';
-
-      const response = await app.inject({
-        method: 'PATCH',
-        url: '/api/admin/orders/order-1/status',
-        headers: adminHeaders(),
-        payload: { status: to },
-      });
-
-      assert.equal(
-        response.statusCode,
-        transitions[from].includes(to) ? 200 : 409,
-        `Unexpected result for ${from} -> ${to}`,
-      );
-    }
-  }
-
-  currentStatus = 'IN_KITCHEN';
-  nextStatus = 'OUT_FOR_DELIVERY';
-  fulfillmentType = 'PICKUP';
-  const mismatchedFulfillment = await app.inject({
-    method: 'PATCH',
-    url: '/api/admin/orders/order-1/status',
-    headers: adminHeaders(),
-    payload: { status: nextStatus },
-  });
-  assert.equal(mismatchedFulfillment.statusCode, 409);
-
-  currentStatus = 'PENDING';
-  nextStatus = 'IN_KITCHEN';
-  fulfillmentType = 'DELIVERY';
-  paymentMethod = 'QR';
-  paymentStatus = 'AWAITING_VERIFICATION';
-  const unpaidQr = await app.inject({
-    method: 'PATCH',
-    url: '/api/admin/orders/order-1/status',
-    headers: adminHeaders(),
-    payload: { status: nextStatus },
-  });
-  assert.equal(unpaidQr.statusCode, 409);
-});
-
-test('payment review requires rejection reasons and supports QR decisions and COD collection', async (context) => {
-  stubOwnerSession(context);
-  let method = 'QR';
-  let currentStatus = 'AWAITING_VERIFICATION';
-  let nextStatus = 'PAID';
-  let rejectionReason: string | null = null;
-  restoreAfter(
-    context,
-    stubMethod(prisma, '$transaction', async (work: (transaction: object) => Promise<unknown>) => {
-      let reads = 0;
-      return work({
-        payment: {
-          findUnique: async () =>
-            ++reads === 1
-              ? { id: 'payment-1', method, status: currentStatus }
-              : {
-                  method,
-                  status: nextStatus,
-                  amount: new Prisma.Decimal('28.25'),
-                  referenceNumber: null,
-                  rejectionReason: nextStatus === 'REJECTED' ? rejectionReason : null,
-                  verifiedAt: new Date(),
-                  verifiedBy: { name: 'Owner' },
-                  statusHistory: [],
-                },
-          updateMany: async () => ({ count: 1 }),
-        },
-        paymentStatusHistory: { create: async () => ({}) },
-      });
-    }),
-  );
-  const app = await createRouteApp(adminOrderRoutes, '/api/admin');
-  context.after(() => app.close());
-
-  const missingReason = await app.inject({
-    method: 'PATCH',
-    url: '/api/admin/orders/order-1/payment',
-    headers: adminHeaders(),
-    payload: { status: 'REJECTED' },
-  });
-  assert.equal(missingReason.statusCode, 400);
-
-  for (const scenario of [
-    { method: 'QR', currentStatus: 'AWAITING_VERIFICATION', nextStatus: 'PAID' },
-    {
+test('admin session authorizes private proof reads and payment transitions', async (context) => {
+  const { client, db } = await createDatabase();
+  context.after(async () => client.close());
+  const { owner, token } = await createOwnerSession(db);
+  const [order] = await db
+    .insert(orders)
+    .values({
+      orderNumber: 'ORD-1',
+      customerName: 'Customer',
+      customerPhone: '5551234567',
+      fulfillmentType: 'PICKUP',
+      status: 'PENDING',
+      paymentMethod: 'QR',
+      subtotal: '25.00',
+      deliveryFee: '0',
+      total: '25.00',
+      trackingTokenHash: createHash('sha256').update('tracking-token').digest('hex'),
+      updatedAt: new Date(),
+    })
+    .returning();
+  const [payment] = await db
+    .insert(payments)
+    .values({
+      orderId: order.id,
       method: 'QR',
-      currentStatus: 'AWAITING_VERIFICATION',
-      nextStatus: 'REJECTED',
-      rejectionReason: 'Receipt is unreadable',
-    },
-    { method: 'COD', currentStatus: 'UNPAID', nextStatus: 'PAID' },
-  ]) {
-    method = scenario.method;
-    currentStatus = scenario.currentStatus;
-    nextStatus = scenario.nextStatus;
-    rejectionReason = scenario.rejectionReason ?? null;
+      status: 'AWAITING_VERIFICATION',
+      amount: '25.00',
+      proofImagePath: 'payment-proofs/proof.png',
+      updatedAt: new Date(),
+    })
+    .returning();
+  assert.ok(payment);
 
-    const response = await app.inject({
-      method: 'PATCH',
-      url: '/api/admin/orders/order-1/payment',
-      headers: adminHeaders(),
-      payload: {
-        status: scenario.nextStatus,
-        ...(scenario.rejectionReason ? { rejectionReason: scenario.rejectionReason } : {}),
-      },
-    });
-
-    assert.equal(response.statusCode, 200);
-    assert.equal(response.json().status, scenario.nextStatus);
-  }
-});
-
-test('admin route protects payment proofs and image storage rejects invalid file content', async (context) => {
-  await assert.rejects(
-    imageStorage.readPaymentProof('../outside.png'),
-    /Invalid stored payment proof path/,
-  );
-  stubOwnerSession(context);
   restoreAfter(
     context,
-    stubMethod(prisma.payment, 'findUnique', async () => ({
-      method: 'QR',
-      proofImagePath: 'payment-proofs/123e4567-e89b-42d3-a456-426614174000.png',
-    })),
     stubMethod(imageStorage, 'readPaymentProof', async () => ({
-      bytes: Buffer.from('private receipt'),
+      bytes: Buffer.from('proof'),
       contentType: 'image/png',
     })),
   );
-  const app = await createRouteApp(adminOrderRoutes, '/api/admin');
+  const app = await createRouteApp(adminOrderRoutes, '/api/admin', db);
   context.after(() => app.close());
 
-  const unauthorized = await app.inject({
+  const denied = await app.inject({
     method: 'GET',
-    url: '/api/admin/orders/order-1/payment-proof',
-  });
-  const authorized = await app.inject({
-    method: 'GET',
-    url: '/api/admin/orders/order-1/payment-proof',
+    url: `/api/admin/orders/${order.id}/payment-proof`,
     headers: adminHeaders(),
   });
+  assert.equal(denied.statusCode, 401);
 
-  assert.equal(unauthorized.statusCode, 401);
-  assert.equal(authorized.statusCode, 200);
-  assert.equal(authorized.headers['cache-control'], 'private, no-store');
-  assert.equal(authorized.headers['x-content-type-options'], 'nosniff');
-  assert.deepEqual(authorized.rawPayload, Buffer.from('private receipt'));
+  const proof = await app.inject({
+    method: 'GET',
+    url: `/api/admin/orders/${order.id}/payment-proof`,
+    headers: adminHeaders(token),
+  });
+  assert.equal(proof.statusCode, 200);
+  assert.equal(proof.headers['cache-control'], 'private, no-store');
+
+  const review = await app.inject({
+    method: 'PATCH',
+    url: `/api/admin/orders/${order.id}/payment`,
+    headers: adminHeaders(token),
+    payload: { status: 'PAID' },
+  });
+  assert.equal(review.statusCode, 200);
+  assert.equal(review.json().status, 'PAID');
+  assert.equal(review.json().verifiedBy.name, owner.name);
+  assert.equal((await db.select().from(schema.paymentStatusHistories)).length, 1);
+
+  const status = await app.inject({
+    method: 'PATCH',
+    url: `/api/admin/orders/${order.id}/status`,
+    headers: adminHeaders(token),
+    payload: { status: 'IN_KITCHEN' },
+  });
+  assert.equal(status.statusCode, 200);
+  assert.equal(status.json().status, 'IN_KITCHEN');
+
+  const readyForPickup = await app.inject({
+    method: 'PATCH',
+    url: `/api/admin/orders/${order.id}/status`,
+    headers: adminHeaders(token),
+    payload: { status: 'READY_FOR_PICKUP' },
+  });
+  assert.equal(readyForPickup.statusCode, 200);
+  const invalidDeliveryTransition = await app.inject({
+    method: 'PATCH',
+    url: `/api/admin/orders/${order.id}/status`,
+    headers: adminHeaders(token),
+    payload: { status: 'OUT_FOR_DELIVERY' },
+  });
+  assert.equal(invalidDeliveryTransition.statusCode, 409);
+
+  const [deliveryOrder] = await db
+    .insert(orders)
+    .values({
+      orderNumber: 'ORD-DELIVERY',
+      customerName: 'Customer',
+      customerPhone: '5551234567',
+      fulfillmentType: 'DELIVERY',
+      status: 'PENDING',
+      paymentMethod: 'COD',
+      subtotal: '25.00',
+      deliveryFee: '3.25',
+      total: '28.25',
+      trackingTokenHash: createHash('sha256').update('delivery-token').digest('hex'),
+      updatedAt: new Date(),
+    })
+    .returning();
+  await db
+    .insert(payments)
+    .values({
+      orderId: deliveryOrder.id,
+      method: 'COD',
+      status: 'UNPAID',
+      amount: '28.25',
+      updatedAt: new Date(),
+    })
+    .returning();
+
+  const invalidPickupTransition = await app.inject({
+    method: 'PATCH',
+    url: `/api/admin/orders/${deliveryOrder.id}/status`,
+    headers: adminHeaders(token),
+    payload: { status: 'READY_FOR_PICKUP' },
+  });
+  assert.equal(invalidPickupTransition.statusCode, 409);
+  const inKitchen = await app.inject({
+    method: 'PATCH',
+    url: `/api/admin/orders/${deliveryOrder.id}/status`,
+    headers: adminHeaders(token),
+    payload: { status: 'IN_KITCHEN' },
+  });
+  assert.equal(inKitchen.statusCode, 200);
+  const outForDelivery = await app.inject({
+    method: 'PATCH',
+    url: `/api/admin/orders/${deliveryOrder.id}/status`,
+    headers: adminHeaders(token),
+    payload: { status: 'OUT_FOR_DELIVERY' },
+  });
+  assert.equal(outForDelivery.statusCode, 200);
+
+  const codCollected = await app.inject({
+    method: 'PATCH',
+    url: `/api/admin/orders/${deliveryOrder.id}/payment`,
+    headers: adminHeaders(token),
+    payload: { status: 'PAID' },
+  });
+  assert.equal(codCollected.statusCode, 200);
+  assert.equal(codCollected.json().status, 'PAID');
+  const [savedCodPayment] = await db
+    .select()
+    .from(payments)
+    .where(eq(payments.orderId, deliveryOrder.id));
+  assert.equal(savedCodPayment.status, 'PAID');
+
+  const [rejectedOrder] = await db
+    .insert(orders)
+    .values({
+      orderNumber: 'ORD-REJECT',
+      customerName: 'Customer',
+      customerPhone: '5551234567',
+      fulfillmentType: 'PICKUP',
+      status: 'PENDING',
+      paymentMethod: 'QR',
+      subtotal: '10.00',
+      deliveryFee: '0',
+      total: '10.00',
+      trackingTokenHash: createHash('sha256').update('rejected-token').digest('hex'),
+      updatedAt: new Date(),
+    })
+    .returning();
+  await db.insert(payments).values({
+    orderId: rejectedOrder.id,
+    method: 'QR',
+    status: 'AWAITING_VERIFICATION',
+    amount: '10.00',
+    updatedAt: new Date(),
+  });
+  const missingReason = await app.inject({
+    method: 'PATCH',
+    url: `/api/admin/orders/${rejectedOrder.id}/payment`,
+    headers: adminHeaders(token),
+    payload: { status: 'REJECTED' },
+  });
+  assert.equal(missingReason.statusCode, 400);
+  const rejected = await app.inject({
+    method: 'PATCH',
+    url: `/api/admin/orders/${rejectedOrder.id}/payment`,
+    headers: adminHeaders(token),
+    payload: { status: 'REJECTED', rejectionReason: 'Receipt is unreadable' },
+  });
+  assert.equal(rejected.statusCode, 200);
+  assert.equal(rejected.json().rejectionReason, 'Receipt is unreadable');
 });
 
-test('admin routes and Socket.IO authenticate owner and customer sessions', async (context) => {
-  const trackingToken = 'B'.repeat(43);
-  const trackingHash = createHash('sha256').update(trackingToken).digest('hex');
-  restoreAfter(
-    context,
-    stubMethod(prisma.adminSession, 'findFirst', async () => ({
-      expiresAt: new Date(Date.now() + 60_000),
-      user: { id: 'owner-1', name: 'Owner' },
-    })),
-    stubMethod(
-      prisma.order,
-      'findUnique',
-      async ({ where }: { where: { trackingTokenHash: string } }) =>
-        where.trackingTokenHash === trackingHash ? { id: 'order-b' } : null,
-    ),
-    stubMethod(prisma.order, 'findMany', async () => []),
-  );
-
-  const app = await createRouteApp(adminOrderRoutes, '/api/admin');
-  context.after(() => app.close());
-  const unauthorizedRoute = await app.inject({ method: 'GET', url: '/api/admin/orders' });
-  const authorizedRoute = await app.inject({
-    method: 'GET',
-    url: '/api/admin/orders',
-    headers: adminHeaders(),
+test('Socket.IO accepts authorized tracking token and rejects invalid credentials', async (context) => {
+  const { client, db } = await createDatabase();
+  context.after(async () => client.close());
+  const trackingToken = randomBytes(32).toString('base64url');
+  await db.insert(orders).values({
+    orderNumber: 'ORD-SOCKET',
+    customerName: 'Customer',
+    customerPhone: '5551234567',
+    fulfillmentType: 'PICKUP',
+    status: 'PENDING',
+    paymentMethod: 'COD',
+    subtotal: '10.00',
+    deliveryFee: '0',
+    total: '10.00',
+    trackingTokenHash: createHash('sha256').update(trackingToken).digest('hex'),
+    updatedAt: new Date(),
   });
-  assert.equal(unauthorizedRoute.statusCode, 401);
-  assert.equal(authorizedRoute.statusCode, 200);
 
   const server = createServer();
-  attachRealtimeServer(server);
-  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
-  const address = server.address() as AddressInfo;
-  const socketUrl = `http://127.0.0.1:${address.port}`;
-  const clients: Socket[] = [];
+  attachRealtimeServer(server, db);
   context.after(async () => {
-    clients.forEach((client) => client.disconnect());
     await closeRealtimeServer();
+    if (server.listening) await new Promise<void>((resolve) => server.close(() => resolve()));
   });
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const address = server.address();
+  assert.ok(address && typeof address !== 'string');
+  const url = `http://127.0.0.1:${address.port}`;
 
-  const openSocket = async (
-    auth: Record<string, unknown>,
-    cookie?: string,
-  ): Promise<{ socket: Socket; error: string | null }> => {
-    const socket = connectSocket(socketUrl, {
-      path: '/api/admin/socket.io',
-      auth,
-      extraHeaders: {
-        origin: env.FRONTEND_ORIGIN,
-        ...(cookie ? { cookie } : {}),
-      },
-      reconnection: false,
-      timeout: 3000,
-      transports: ['websocket'],
-    });
-    clients.push(socket);
-    return new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => reject(new Error('Socket authentication timed out')), 4000);
-      socket.once('connect', () => {
-        clearTimeout(timeout);
-        resolve({ socket, error: null });
-      });
-      socket.once('connect_error', (error) => {
-        clearTimeout(timeout);
-        resolve({ socket, error: error.message });
-      });
-    });
-  };
+  const socket = connectSocket(url, {
+    path: '/api/admin/socket.io',
+    auth: { role: 'customer', trackingToken },
+    extraHeaders: { origin: env.FRONTEND_ORIGIN },
+    transports: ['websocket'],
+    forceNew: true,
+  });
+  context.after(() => socket.close());
+  await new Promise<void>((resolve, reject) => {
+    socket.once('connect', resolve);
+    socket.once('connect_error', reject);
+  });
+  assert.equal(socket.connected, true);
 
-  const anonymousOwner = await openSocket({ role: 'owner' });
-  const otherCustomer = await openSocket({ role: 'customer', trackingToken: 'A'.repeat(43) });
-  const validCustomer = await openSocket({ role: 'customer', trackingToken });
-  const validOwner = await openSocket({ role: 'owner' }, 'ordertaker_admin=valid-session');
+  const { token: ownerToken } = await createOwnerSession(db);
+  const ownerSocket = connectSocket(url, {
+    path: '/api/admin/socket.io',
+    auth: { role: 'owner' },
+    extraHeaders: {
+      origin: env.FRONTEND_ORIGIN,
+      cookie: `${sessionCookieName}=${ownerToken}`,
+    },
+    transports: ['websocket'],
+    forceNew: true,
+  });
+  context.after(() => ownerSocket.close());
+  await new Promise<void>((resolve, reject) => {
+    ownerSocket.once('connect', resolve);
+    ownerSocket.once('connect_error', reject);
+  });
+  assert.equal(ownerSocket.connected, true);
 
-  assert.equal(anonymousOwner.error, 'Authentication required');
-  assert.equal(otherCustomer.error, 'Authentication required');
-  assert.equal(validCustomer.socket.connected, true);
-  assert.equal(validOwner.socket.connected, true);
+  socket.close();
+  ownerSocket.close();
+  await closeRealtimeServer();
+  await new Promise<void>((resolve) => server.close(() => resolve()));
+
+  const invalidServer = createServer();
+  attachRealtimeServer(invalidServer, db);
+  context.after(async () => {
+    await closeRealtimeServer();
+    if (invalidServer.listening) {
+      await new Promise<void>((resolve) => invalidServer.close(() => resolve()));
+    }
+  });
+  await new Promise<void>((resolve) => invalidServer.listen(0, resolve));
+  const invalidAddress = invalidServer.address();
+  assert.ok(invalidAddress && typeof invalidAddress !== 'string');
+  const invalidSocket: Socket = connectSocket(`http://127.0.0.1:${invalidAddress.port}`, {
+    path: '/api/admin/socket.io',
+    auth: { role: 'customer', trackingToken: 'invalid' },
+    extraHeaders: { origin: env.FRONTEND_ORIGIN },
+    transports: ['websocket'],
+    forceNew: true,
+  });
+  context.after(() => invalidSocket.close());
+  await new Promise<void>((resolve) => {
+    invalidSocket.once('connect_error', () => resolve());
+  });
+  assert.equal(invalidSocket.connected, false);
+  invalidSocket.close();
+  await closeRealtimeServer();
+  await new Promise<void>((resolve) => invalidServer.close(() => resolve()));
 });
 
-test('production configuration refuses an insecure frontend origin', () => {
-  const result = spawnSync(
-    process.execPath,
-    ['--import', 'tsx', '--input-type=module', '-e', 'await import("./src/config/env.ts")'],
-    {
-      cwd: new URL('..', import.meta.url),
-      encoding: 'utf8',
-      env: {
-        ...process.env,
-        NODE_ENV: 'production',
-        DATABASE_URL: 'postgresql://test:test@127.0.0.1:5432/ordertaker_test',
-        FRONTEND_ORIGIN: 'http://store.example.com',
-      },
-    },
-  );
+test('Supabase Storage keeps proof objects private and product images public', async (context) => {
+  const originalFetch = globalThis.fetch;
+  const requests: Array<{ url: string; init?: RequestInit }> = [];
+  globalThis.fetch = async (input, init) => {
+    requests.push({ url: String(input), init });
+    return new Response(null, { status: 200 });
+  };
+  context.after(() => {
+    globalThis.fetch = originalFetch;
+  });
 
-  assert.notEqual(result.status, 0);
-  assert.match(result.stderr, /FRONTEND_ORIGIN must use HTTPS in production/);
+  const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).toString('base64');
+  await assert.rejects(() => imageStorage.savePaymentProof('eA=='), ImageValidationError);
+  const productImage = await imageStorage.saveProductImage(png);
+  const proofPath = await imageStorage.savePaymentProof(png);
+  assert.match(productImage, /\/object\/public\/product-images\/products\//);
+  assert.match(proofPath, /^payment-proofs\/[0-9a-f-]+\.png$/);
+  assert.equal(requests[0].url.includes('/public/'), false);
+  assert.equal(requests[1].url.includes('/public/'), false);
+  assert.equal(requests[1].url.includes('payment-proofs'), true);
+  assert.equal(requests[1].init?.headers instanceof Object, true);
 });

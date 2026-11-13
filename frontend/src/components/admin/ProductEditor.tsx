@@ -1,6 +1,6 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { useEffect, useState, type FormEvent } from 'react';
-import { apiRequest, apiUrl, jsonBody } from '../../api';
+import { apiRequest, jsonBody } from '../../api';
 import type { Category, Product } from '../../types';
 import { imageData } from '../../utils';
 import { ErrorNotice } from '../shared/ErrorNotice';
@@ -26,7 +26,7 @@ export function ProductEditor({
     if (!imagePreview) return;
     return () => URL.revokeObjectURL(imagePreview);
   }, [imagePreview]);
-  const imageSrc = imagePreview ?? (product?.imagePath ? `${apiUrl}${product.imagePath}` : null);
+  const imageSrc = imagePreview ?? product?.imagePath ?? null;
   const save = useMutation({
     mutationFn: async () => {
       if (image && image.size > 5 * 1024 * 1024) {

@@ -1,7 +1,10 @@
-import { PrismaClient } from '@prisma/client';
-import { PrismaPg } from '@prisma/adapter-pg';
-import { env } from './config/env.js';
+import { drizzle, type PostgresJsDatabase } from 'drizzle-orm/postgres-js';
+import type postgres from 'postgres';
+import * as schema from './db/schema/index.js';
 
-const adapter = new PrismaPg({ connectionString: env.DATABASE_URL });
+export type AppDatabase = PostgresJsDatabase<typeof schema>;
 
-export const prisma = new PrismaClient({ adapter });
+export function createDatabase(client: ReturnType<typeof postgres>): AppDatabase {
+  // Workspaces resolve postgres.js through separate paths; runtime clients remain compatible.
+  return drizzle({ client: client as never, schema });
+}

@@ -7,53 +7,45 @@ tracking, and owner-managed order workflows.
 
 - Node.js 20.19+ or 22.12+
 - npm 10+
-- PostgreSQL 16+ installed and running locally
+- A Supabase project with PostgreSQL and Storage
 
 ## Local setup
 
-1. Install PostgreSQL and make sure its service is running and accepting
-   connections on `localhost:5432`.
-2. Create a database and a dedicated application role. For example, connect
-   with a PostgreSQL administrator account using `psql` or pgAdmin and run:
-
-   ```sql
-   CREATE ROLE food_ordering LOGIN PASSWORD 'replace-with-a-private-password';
-   CREATE DATABASE food_ordering OWNER food_ordering;
-   ```
-
-3. Copy `.env.example` to `.env`. Set `DATABASE_URL` to use the password you
-   chose for the PostgreSQL role, and set a private `OWNER_PASSWORD`.
-4. Install dependencies with `npm install`.
-5. Generate the Prisma client and apply the database migration:
+1. Create Supabase Storage buckets named `product-images` (public) and
+   `payment-proofs` (private).
+2. Copy `.env.example` to `.env`. Set the Supabase project URL, service-role key,
+   pooled `DATABASE_URL`, direct `DIRECT_URL`, and a private `OWNER_PASSWORD`.
+   Keep the service-role key on the backend only.
+3. Install dependencies with `npm install`.
+4. Generate and apply Drizzle migrations:
 
    ```powershell
-   npm run db:generate
    npm run db:migrate
    ```
 
-6. Seed the owner, starter categories/products, and store settings:
+   `DATABASE_URL` uses Supabase's transaction pooler for runtime traffic.
+   `DIRECT_URL` uses the direct database connection for migrations. Drizzle
+   numeric columns remain decimal strings; checkout converts money to cents.
+
+5. Seed the owner, starter categories/products, and store settings:
 
    ```powershell
    npm run db:seed
    ```
 
-7. Start both applications with `npm run dev`.
+6. Start both applications with `npm run dev`.
 
-The application connects to the PostgreSQL server through `DATABASE_URL`; it
-does not install, start, or manage the PostgreSQL service. Use the same
-configuration for a production PostgreSQL instance and provide production
-environment variables through the server's environment rather than committing
-credentials.
+The application uses Supabase-hosted PostgreSQL through Drizzle ORM. Product
+and QR images use the public Storage bucket; payment proofs use the private bucket.
+Never commit `.env` or expose the service-role key to Vite or browser code.
 
 The storefront runs at <http://localhost:5173>; the public menu is at `/` and
 the guest cart and checkout are at `/checkout`. The owner dashboard is at
 `/admin`. The API health check is available at
 <http://localhost:3000/api/health>. The owner dashboard supports category and
 product management, including availability, archive/restore, and product image
-uploads. Product image files are stored under
-`backend/public/uploads/products/`; the API validates the decoded file signature
-and limits images to 5 MB. Fastify Static serves files from
-`backend/public/uploads/` at `/uploads/`.
+uploads. The API validates image signatures and limits images to 5 MB before
+uploading them to Supabase Storage.
 
 Admin sessions use random opaque tokens stored as hashes in the database, with
 12-hour expiry. The HTTP-only cookie is `SameSite=Lax`, uses `Secure` in
@@ -66,9 +58,9 @@ history are committed together. Checkout uses a UUID `Idempotency-Key`; the
 database stores only its hash, and duplicate requests do not create another
 order. The tracking token is random and only its hash is stored.
 QR checkout accepts an optional payment reference number and requires a JPEG,
-PNG, or WebP payment-receipt image (up to 5 MB). Receipt files are stored under
-`backend/private/uploads/payment-proofs/`, outside the public static-file
-directory, and served only through an authenticated owner endpoint. The owner
+PNG, or WebP payment-receipt image (up to 5 MB). Receipt files are stored in the
+private Supabase bucket and served only through the authenticated owner endpoint.
+The owner
 can review and approve/reject QR payments or mark COD orders as collected; each
 payment status change records its actor, timestamp, and note. Customers can see
 payment status and rejection reasons through their secure tracking link and
@@ -81,7 +73,7 @@ owner dashboard at `/admin` includes a filterable order board with validated
 drag-and-drop and mobile status controls; each status update is recorded in
 order history. The QR payment tab lets the owner upload, replace, or remove the
 store payment QR image and configure customer instructions. The QR image is
-served from the public `/uploads/` static-file mount and shown during checkout.
+served from the public Supabase bucket and shown during checkout.
 Unpaid QR orders cannot enter the kitchen; COD orders can proceed while unpaid.
 
 The API also serves authenticated Socket.IO connections at
@@ -93,11 +85,11 @@ dashboard support order-linked messages. REST remains the source of truth:
 clients refetch on socket reconnect and periodically poll while the connection
 is unavailable.
 
-`npm test` runs backend route and authorization tests using mocked persistence;
-it does not require a running PostgreSQL server. The suite covers delivery and
-pickup checkout with COD and QR, server-side totals and delivery fees, order
-status transitions and payment rules, tracking-token isolation, private receipt
-access, image validation, admin routes, and Socket.IO authentication.
+`npm test` runs backend integration tests against PGlite; it does not require a
+running PostgreSQL server. The suite covers delivery/COD and pickup/QR checkout,
+idempotency, unavailable products, message isolation, admin authorization,
+payment review and COD collection, fulfillment status transitions, private
+receipt access, storage visibility, and owner/customer Socket.IO authentication.
 `npm run build`, `npm run lint`, and `npm run format:check` provide additional
 local quality checks.
 
@@ -108,68 +100,59 @@ aware that seeding updates the owner password and starter products.
 
 ## Production deployment
 
-No hosting provider is assumed by this repository. Before deploying, choose a
-provider that supplies PostgreSQL and persistent application storage, and
-configure the following values through its secret/environment settings:
+### Supabase setup
 
-- `NODE_ENV=production`
-- `DATABASE_URL` for the production PostgreSQL database, using the provider's
-  required TLS options and a least-privilege application role
-- `API_HOST` and `API_PORT` for the provider's network interface
-- `FRONTEND_ORIGIN=https://<public-storefront-host>` (the API rejects an
-  insecure frontend origin in production)
-- `VITE_API_URL=https://<public-api-host>` when building the frontend
-- `OWNER_NAME`, `OWNER_EMAIL`, and a unique `OWNER_PASSWORD` of at least 12
-  characters for the initial seed only
+1. Create a Supabase project and create public `product-images` and private
+   `payment-proofs` Storage buckets.
+2. Copy the project URL and service-role key into the Render backend
+   environment. Never add the service-role key to frontend variables.
+3. Set `DATABASE_URL` to Supabase's transaction-pooler URI, normally port 6543.
+   Set `DIRECT_URL` to the direct PostgreSQL URI for Drizzle migrations. If the
+   direct database host is unreachable from Render, use Supabase's session
+   pooler URI on port 5432 for `DIRECT_URL`.
+4. URL-encode special characters in the database password. Keep both database
+   URLs and storage credentials in Render's secret environment settings.
 
-Terminate HTTPS at the platform or reverse proxy for both the storefront and
-API. Configure it to forward Socket.IO/WebSocket upgrades for
-`/api/admin/socket.io`, allow the exact storefront origin, and preserve
-credentials/cookies. The admin cookie is marked `Secure` in production.
-Run a single backend instance unless shared Socket.IO, database, and upload
-storage are configured for multiple instances.
+### Render deployment
 
-From a clean deployment checkout, install the locked dependencies, generate
-the Prisma client, apply committed migrations, build, and start the backend:
+1. Create a Render Blueprint from this repository and apply `render.yaml`.
+   Render builds the Fastify API as a Web Service and React/Vite as a Static
+   Site. The API build compiles TypeScript and committed Drizzle schema files.
+2. Set `DATABASE_URL`, `DIRECT_URL`, `SUPABASE_URL`,
+   `SUPABASE_SERVICE_ROLE_KEY`, and `FRONTEND_ORIGIN` on the backend service.
+   Set `VITE_API_URL` on the static site to the API's HTTPS URL.
+3. Set `FRONTEND_ORIGIN` to the static site's exact HTTPS origin. Save and
+   redeploy both services after setting their URLs.
+4. Render runs `db:deploy` before starting the API. On a new database, this
+   applies committed Drizzle SQL. On an existing complete database, the deploy
+   script records a baseline instead of replaying initial table creation. It
+   refuses partial schemas for manual review. Historical SQL migrations remain
+   archived under `backend/drizzle/legacy-sql/` and are not replayed. Run
+   `npm run db:seed -w @ordertaker/backend` once from the backend service shell
+   for a new database, after setting `OWNER_NAME`, `OWNER_EMAIL`, and a unique
+   `OWNER_PASSWORD` of at least 12 characters. Do not run seed as routine
+   deployment; it updates owner and starter-product data.
+5. Confirm `/api/health`, guest checkout, owner login, payment-proof review,
+   and WebSocket upgrades at `/api/admin/socket.io`.
 
-```powershell
-npm ci
-npm run db:generate
-npm run db:deploy
-npm run build
-npm run start -w @ordertaker/backend
-```
+Render terminates HTTPS and supports WebSocket upgrades on the same API
+service. Keep one backend instance because Socket.IO rooms use in-process
+state. CORS and Socket.IO accept only `FRONTEND_ORIGIN`; production admin
+cookies use `Secure`.
 
-Build the frontend with `VITE_API_URL` set to the HTTPS API URL and publish
-`frontend/dist` using the selected static hosting provider. Run `npm run
-db:seed` once for a new database, after setting the owner seed values; do not
-run it as a routine deployment because it updates the owner password and
-starter-product fields. Do not use the development-only `npm run db:migrate`
-command in production.
+The Render Blueprint uses `npm ci --include=dev` and
+`npm run build -w @ordertaker/backend` for the API.
+It starts the API with `npm run db:deploy -w @ordertaker/backend` followed by
+`npm run start -w @ordertaker/backend`. The frontend runs
+`npm run build -w @ordertaker/frontend` and publishes `frontend/dist`; its
+rewrite route supports React Router paths.
 
-The backend stores product/QR images under `backend/public/uploads/` and
-private payment proofs under `backend/private/uploads/`. Mount persistent
-storage for both directories; the private directory must not be served as
-static content. Schedule encrypted, access-controlled backups of the database
-and both upload directories, retain multiple restore points, and periodically
-test restoring them together. For a Windows host with PostgreSQL client tools,
-one manual backup sequence is:
-
-```powershell
-$backup = "C:\backups\ordertaker\$(Get-Date -Format yyyyMMdd-HHmmss)"
-New-Item -ItemType Directory -Force $backup | Out-Null
-pg_dump --dbname="$env:DATABASE_URL" --format=custom --file "$backup\database.dump"
-New-Item -ItemType Directory -Force "backend\private\uploads" | Out-Null
-Compress-Archive -Path "backend\public\uploads","backend\private\uploads" -DestinationPath "$backup\uploads.zip"
-```
-
-Keep the backup destination outside the application tree and protect it with
-the same access controls as the database credentials. To restore, stop writes,
-restore the database dump with `pg_restore --no-owner --clean --if-exists`,
-restore the matching upload archive to the corresponding public and private
-directories, verify file permissions, and then restart the application.
-Adapt the commands and scheduling to the selected host; backups are not
-automatically configured by this repository.
+Before moving an existing local installation, back up PostgreSQL and local
+uploads. Restore the database into Supabase, upload product and QR images to
+the public bucket, upload payment proofs to the private bucket, and update
+stored image URLs/object paths to the new Supabase locations. Verify this data
+before switching production traffic. Configure and test Supabase database and
+Storage backups separately; this repository does not schedule backups.
 
 ## Owner handover and acceptance
 
@@ -186,6 +169,6 @@ and desktop widths. Check empty menu/cart/order states, loading indicators,
 validation and API errors, offline/reconnect behavior, guest checkout, tracking,
 owner payment review, and mobile order-status controls. Also verify the
 production health endpoint, HTTPS cookies, WebSocket upgrade, migration
-completion, and a database-plus-uploads restore before handover. These
-provider-specific deployment and manual acceptance steps remain outstanding
-until completed in the chosen hosting environment.
+completion, private payment-proof authorization, and database/Storage restore
+before handover. These provider-specific deployment and manual acceptance
+steps remain outstanding until completed in the chosen hosting environment.

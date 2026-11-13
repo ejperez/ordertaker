@@ -1,6 +1,7 @@
 import { createHash, randomBytes } from 'node:crypto';
+import { and, eq, gt } from 'drizzle-orm';
 import type { FastifyReply, FastifyRequest } from 'fastify';
-import { prisma } from './db.js';
+import { adminSessions } from './db/schema/auth.js';
 import { env } from './config/env.js';
 
 export const sessionCookieName = 'ordertaker_admin';
@@ -60,9 +61,12 @@ export async function requireOwner(request: FastifyRequest, reply: FastifyReply)
     return;
   }
 
-  const session = await prisma.adminSession.findFirst({
-    where: { tokenHash: hashSessionToken(token), expiresAt: { gt: new Date() } },
-    select: { user: { select: { id: true, name: true, email: true } } },
+  const session = await request.server.db.query.adminSessions.findFirst({
+    where: and(
+      eq(adminSessions.tokenHash, hashSessionToken(token)),
+      gt(adminSessions.expiresAt, new Date()),
+    ),
+    with: { user: { columns: { id: true, name: true, email: true } } },
   });
   if (!session) {
     clearSessionCookie(reply);

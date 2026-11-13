@@ -1,37 +1,56 @@
 import type { FastifyPluginAsync } from 'fastify';
-import { prisma } from '../db.js';
+import { and, asc, eq, inArray } from 'drizzle-orm';
+import { categories, products, storeSettings } from '../db/schema/index.js';
 
 export const catalogRoutes: FastifyPluginAsync = async (app) => {
-  app.get('/products', async () =>
-    prisma.product.findMany({
-      where: { isArchived: false, category: { isActive: true } },
-      include: { category: { select: { id: true, name: true, slug: true } } },
-      orderBy: [{ category: { sortOrder: 'asc' } }, { name: 'asc' }],
-    }),
-  );
+  app.get('/products', async () => {
+    const result = await app.db
+      .select({
+        id: products.id,
+        categoryId: products.categoryId,
+        name: products.name,
+        slug: products.slug,
+        description: products.description,
+        price: products.price,
+        imagePath: products.imagePath,
+        isAvailable: products.isAvailable,
+        isArchived: products.isArchived,
+        createdAt: products.createdAt,
+        updatedAt: products.updatedAt,
+        category: {
+          id: categories.id,
+          name: categories.name,
+          slug: categories.slug,
+        },
+      })
+      .from(products)
+      .innerJoin(categories, eq(products.categoryId, categories.id))
+      .where(and(eq(products.isArchived, false), eq(categories.isActive, true)))
+      .orderBy(asc(categories.sortOrder), asc(products.name));
+    return result;
+  });
 
   app.get('/categories', async () =>
-    prisma.category.findMany({
-      where: { isActive: true },
-      orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }],
+    app.db.query.categories.findMany({
+      where: eq(categories.isActive, true),
+      orderBy: [asc(categories.sortOrder), asc(categories.name)],
     }),
   );
 
   app.get('/store', async () => {
-    const settings = await prisma.storeSetting.findMany({
-      where: {
-        key: {
-          in: [
-            'store_name',
-            'pickup_address',
-            'pickup_instructions',
-            'delivery_fee',
-            'qr_payment_image',
-            'qr_payment_instructions',
-          ],
-        },
-      },
-    });
+    const settings = await app.db
+      .select()
+      .from(storeSettings)
+      .where(
+        inArray(storeSettings.key, [
+          'store_name',
+          'pickup_address',
+          'pickup_instructions',
+          'delivery_fee',
+          'qr_payment_image',
+          'qr_payment_instructions',
+        ]),
+      );
     const values = new Map(settings.map((setting) => [setting.key, setting.value]));
     const stringSetting = (key: string, fallback = '') => {
       const value = values.get(key);

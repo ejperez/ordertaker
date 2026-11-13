@@ -1,7 +1,7 @@
 import { useQuery } from '@tanstack/react-query';
 import { useState } from 'react';
 import { Link } from 'react-router-dom';
-import { apiRequest, apiUrl } from '../../api';
+import { apiRequest } from '../../api';
 import type { CartLine, Category, Product } from '../../types';
 import { formatPrice } from '../../utils';
 import { ErrorNotice } from '../shared/ErrorNotice';
@@ -123,7 +123,7 @@ export function HomePage({
                         {product.imagePath ? (
                           <img
                             className="w-full bg-stone-100 aspect-square rounded-2xl"
-                            src={`${apiUrl}${product.imagePath}`}
+                            src={product.imagePath}
                             alt={product.name}
                           />
                         ) : (

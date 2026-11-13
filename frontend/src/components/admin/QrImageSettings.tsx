@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useEffect, useState } from 'react';
-import { apiRequest, apiUrl, jsonBody } from '../../api';
+import { apiRequest, jsonBody } from '../../api';
 import { imageData } from '../../utils';
 import { ErrorNotice } from '../shared/ErrorNotice';
 
@@ -95,7 +95,7 @@ export function QrImageSettings() {
       {image.data?.imagePath ? (
         <img
           className="mt-4 max-h-72 max-w-full rounded-lg border border-stone-200 object-contain"
-          src={`${apiUrl}${image.data.imagePath}`}
+          src={image.data.imagePath}
           alt="Current store QR payment code"
         />
       ) : (

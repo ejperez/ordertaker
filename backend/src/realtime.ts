@@ -1,9 +1,11 @@
 import { createHash } from 'node:crypto';
 import type { Server as HttpServer } from 'node:http';
 import { Server } from 'socket.io';
+import { and, eq, gt } from 'drizzle-orm';
 import { env } from './config/env.js';
 import { hashSessionToken, sessionCookieName } from './auth.js';
-import { prisma } from './db.js';
+import type { AppDatabase } from './db.js';
+import { adminSessions, orders } from './db/schema/index.js';
 
 const ownerRoom = 'owners';
 let realtimeServer: Server | null = null;
@@ -20,7 +22,7 @@ function readCookie(cookieHeader: string | undefined, name: string): string | nu
   return cookie ? cookie.slice(name.length + 1) || null : null;
 }
 
-export function attachRealtimeServer(server: HttpServer): Server {
+export function attachRealtimeServer(server: HttpServer, db: AppDatabase): Server {
   const io = new Server(server, {
     path: '/api/admin/socket.io',
     cors: { origin: env.FRONTEND_ORIGIN, credentials: true },
@@ -38,9 +40,13 @@ export function attachRealtimeServer(server: HttpServer): Server {
       const requestedRole = socket.handshake.auth?.role;
       const ownerToken = readCookie(socket.handshake.headers.cookie, sessionCookieName);
       if (requestedRole === 'owner' && ownerToken) {
-        const session = await prisma.adminSession.findFirst({
-          where: { tokenHash: hashSessionToken(ownerToken), expiresAt: { gt: new Date() } },
-          select: { expiresAt: true, user: { select: { id: true, name: true } } },
+        const session = await db.query.adminSessions.findFirst({
+          where: and(
+            eq(adminSessions.tokenHash, hashSessionToken(ownerToken)),
+            gt(adminSessions.expiresAt, new Date()),
+          ),
+          columns: { expiresAt: true },
+          with: { user: { columns: { id: true, name: true } } },
         });
         if (!session) {
           next(new Error('Authentication required'));
@@ -64,9 +70,9 @@ export function attachRealtimeServer(server: HttpServer): Server {
         return;
       }
 
-      const order = await prisma.order.findUnique({
-        where: { trackingTokenHash: hashTrackingToken(token) },
-        select: { id: true },
+      const order = await db.query.orders.findFirst({
+        where: eq(orders.trackingTokenHash, hashTrackingToken(token)),
+        columns: { id: true },
       });
       if (!order) {
         next(new Error('Authentication required'));

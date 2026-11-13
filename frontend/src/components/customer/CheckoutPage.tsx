@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useRef, useState, type FormEvent } from 'react';
 import { Link } from 'react-router-dom';
-import { apiRequest, apiUrl, jsonBody } from '../../api';
+import { apiRequest, jsonBody } from '../../api';
 import type { CartLine, OrderResult, Product, StoreInfo } from '../../types';
 import { checkoutKeyStorageKey, formatPrice, imageData } from '../../utils';
 import { ErrorNotice } from '../shared/ErrorNotice';
@@ -206,7 +206,7 @@ export function CheckoutPage({
                           <div>
                             <img
                               className="w-12 bg-stone-100 aspect-square rounded-md"
-                              src={`${apiUrl}${product.imagePath}`}
+                              src={product.imagePath ?? undefined}
                               alt={product.name}
                             />
                           </div>
@@ -389,7 +389,7 @@ export function CheckoutPage({
                       className="mb-3 w-56 max-w-full rounded-lg bg-white object-contain"
                       src={
                         store.data?.qrPaymentImage
-                          ? `${apiUrl}${store.data.qrPaymentImage}`
+                          ? store.data.qrPaymentImage
                           : '/qr-payment-placeholder.svg'
                       }
                       alt={

@@ -1,20 +1,6 @@
 import { randomUUID } from 'node:crypto';
-import { mkdir, readFile, unlink, writeFile } from 'node:fs/promises';
-import { dirname, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { env } from '../config/env.js';
 
-const productsDirectory = resolve(
-  dirname(fileURLToPath(import.meta.url)),
-  '../../public/uploads/products',
-);
-const storeImagesDirectory = resolve(
-  dirname(fileURLToPath(import.meta.url)),
-  '../../public/uploads/store',
-);
-const paymentProofsDirectory = resolve(
-  dirname(fileURLToPath(import.meta.url)),
-  '../../private/uploads/payment-proofs',
-);
 const maxImageBytes = 5 * 1024 * 1024;
 const storedFilenamePattern =
   /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.(?:jpg|png|webp)$/i;
@@ -52,7 +38,9 @@ export interface ImageStorageService {
   removePaymentProof(proofPath: string | null): Promise<void>;
 }
 
-function decodeImage(data: string): { bytes: Buffer; extension: string } {
+const storageEndpoint = `${env.SUPABASE_URL.replace(/\/$/, '')}/storage/v1/object`;
+
+function decodeImage(data: string): { bytes: Buffer; extension: string; contentType: string } {
   if (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(data)) {
     throw new ImageValidationError('Image data must be valid base64');
   }
@@ -64,51 +52,154 @@ function decodeImage(data: string): { bytes: Buffer; extension: string } {
 
   const format = signatures.find((candidate) => candidate.matches(bytes));
   if (!format) throw new ImageValidationError('Only JPEG, PNG, and WebP images are supported');
-  return { bytes, extension: format.extension };
+  return { bytes, extension: format.extension, contentType: format.mimeType };
 }
 
-export class LocalImageStorageService implements ImageStorageService {
+function objectUrl(bucket: string, objectPath: string): string {
+  const encodedPath = objectPath.split('/').map(encodeURIComponent).join('/');
+  return `${storageEndpoint}/${encodeURIComponent(bucket)}/${encodedPath}`;
+}
+
+function publicImageUrl(bucket: string, objectPath: string): string {
+  return `${storageEndpoint}/public/${encodeURIComponent(bucket)}/${objectPath
+    .split('/')
+    .map(encodeURIComponent)
+    .join('/')}`;
+}
+
+async function storageRequest(
+  method: 'DELETE' | 'GET' | 'POST',
+  bucket: string,
+  objectPath: string,
+  body?: Buffer | string,
+  contentType?: string,
+): Promise<Response> {
+  const url =
+    method === 'DELETE'
+      ? `${storageEndpoint}/${encodeURIComponent(bucket)}`
+      : objectUrl(bucket, objectPath);
+  const requestBody: BodyInit | undefined =
+    typeof body === 'string' ? body : body === undefined ? undefined : Uint8Array.from(body);
+  const response = await fetch(url, {
+    method,
+    headers: {
+      apikey: env.SUPABASE_SERVICE_ROLE_KEY,
+      Authorization: `Bearer ${env.SUPABASE_SERVICE_ROLE_KEY}`,
+      ...(contentType ? { 'Content-Type': contentType } : {}),
+      ...(method === 'POST' ? { 'x-upsert': 'false' } : {}),
+    },
+    ...(requestBody === undefined ? {} : { body: requestBody }),
+  });
+  if (!response.ok) {
+    throw new Error(`Supabase Storage ${method} failed (${response.status})`);
+  }
+  return response;
+}
+
+function publicImageObjectPath(imageUrl: string, folder: 'products' | 'store'): string {
+  let url: URL;
+  try {
+    url = new URL(imageUrl);
+  } catch {
+    throw new ImageValidationError('Invalid stored image path');
+  }
+
+  const baseUrl = new URL(env.SUPABASE_URL);
+  const prefix = `/storage/v1/object/public/${env.SUPABASE_PRODUCT_BUCKET}/${folder}/`;
+  const filename = url.pathname.startsWith(prefix) ? url.pathname.slice(prefix.length) : '';
+  if (
+    url.origin !== baseUrl.origin ||
+    url.search ||
+    url.hash ||
+    !storedFilenamePattern.test(filename)
+  ) {
+    throw new ImageValidationError('Invalid stored image path');
+  }
+  return `${folder}/${filename}`;
+}
+
+function paymentProofObjectPath(proofPath: string): string {
+  const [directory, filename, ...extraParts] = proofPath.split('/');
+  if (
+    directory !== 'payment-proofs' ||
+    extraParts.length > 0 ||
+    !filename ||
+    !storedFilenamePattern.test(filename)
+  ) {
+    throw new ImageValidationError('Invalid stored payment proof path');
+  }
+  return proofPath;
+}
+
+function imageContentType(filename: string): string {
+  const extension = filename.slice(filename.lastIndexOf('.')).toLowerCase();
+  return extension === '.jpg' ? 'image/jpeg' : extension === '.png' ? 'image/png' : 'image/webp';
+}
+
+export class SupabaseImageStorageService implements ImageStorageService {
   async saveProductImage(data: string): Promise<string> {
     const image = decodeImage(data);
-    await mkdir(productsDirectory, { recursive: true });
     const filename = `${randomUUID()}${image.extension}`;
-    await writeFile(resolve(productsDirectory, filename), image.bytes, { flag: 'wx' });
-    return `/uploads/products/${filename}`;
+    const objectPath = `products/${filename}`;
+    await storageRequest(
+      'POST',
+      env.SUPABASE_PRODUCT_BUCKET,
+      objectPath,
+      image.bytes,
+      image.contentType,
+    );
+    return publicImageUrl(env.SUPABASE_PRODUCT_BUCKET, objectPath);
   }
 
   async removeProductImage(imagePath: string | null): Promise<void> {
     if (!imagePath) return;
-    const filename = imagePath.split('/').at(-1);
-    if (!filename || !storedFilenamePattern.test(filename)) {
-      throw new ImageValidationError('Invalid stored image path');
-    }
-    await unlink(resolve(productsDirectory, filename));
+    const objectPath = publicImageObjectPath(imagePath, 'products');
+    await storageRequest(
+      'DELETE',
+      env.SUPABASE_PRODUCT_BUCKET,
+      objectPath,
+      JSON.stringify({ prefixes: [objectPath] }),
+      'application/json',
+    );
   }
 
   async saveQrPaymentImage(data: string): Promise<string> {
     const image = decodeImage(data);
-    await mkdir(storeImagesDirectory, { recursive: true });
     const filename = `${randomUUID()}${image.extension}`;
-    await writeFile(resolve(storeImagesDirectory, filename), image.bytes, { flag: 'wx' });
-    return `/uploads/store/${filename}`;
+    const objectPath = `store/${filename}`;
+    await storageRequest(
+      'POST',
+      env.SUPABASE_PRODUCT_BUCKET,
+      objectPath,
+      image.bytes,
+      image.contentType,
+    );
+    return publicImageUrl(env.SUPABASE_PRODUCT_BUCKET, objectPath);
   }
 
   async removeQrPaymentImage(imagePath: string | null): Promise<void> {
     if (!imagePath) return;
-    const filename = imagePath.startsWith('/uploads/store/')
-      ? imagePath.slice('/uploads/store/'.length)
-      : '';
-    if (!storedFilenamePattern.test(filename)) {
-      throw new ImageValidationError('Invalid stored QR payment image path');
-    }
-    await unlink(resolve(storeImagesDirectory, filename));
+    const objectPath = publicImageObjectPath(imagePath, 'store');
+    await storageRequest(
+      'DELETE',
+      env.SUPABASE_PRODUCT_BUCKET,
+      objectPath,
+      JSON.stringify({ prefixes: [objectPath] }),
+      'application/json',
+    );
   }
 
   async savePaymentProof(data: string): Promise<string> {
     const image = decodeImage(data);
-    await mkdir(paymentProofsDirectory, { recursive: true });
     const filename = `${randomUUID()}${image.extension}`;
-    await writeFile(resolve(paymentProofsDirectory, filename), image.bytes, { flag: 'wx' });
+    const objectPath = `payment-proofs/${filename}`;
+    await storageRequest(
+      'POST',
+      env.SUPABASE_PAYMENT_PROOFS_BUCKET,
+      objectPath,
+      image.bytes,
+      image.contentType,
+    );
     return `payment-proofs/${filename}`;
   }
 
@@ -116,36 +207,25 @@ export class LocalImageStorageService implements ImageStorageService {
     proofPath: string | null,
   ): Promise<{ bytes: Buffer; contentType: string } | null> {
     if (!proofPath) return null;
-    const [directory, filename, ...extraParts] = proofPath.split('/');
-    if (
-      directory !== 'payment-proofs' ||
-      extraParts.length > 0 ||
-      !filename ||
-      !storedFilenamePattern.test(filename)
-    ) {
-      throw new ImageValidationError('Invalid stored payment proof path');
-    }
-
-    const extension = filename.slice(filename.lastIndexOf('.')).toLowerCase();
-    const contentType =
-      extension === '.jpg' ? 'image/jpeg' : extension === '.png' ? 'image/png' : 'image/webp';
-    const bytes = await readFile(resolve(paymentProofsDirectory, filename));
-    return { bytes, contentType };
+    const objectPath = paymentProofObjectPath(proofPath);
+    const response = await storageRequest('GET', env.SUPABASE_PAYMENT_PROOFS_BUCKET, objectPath);
+    return {
+      bytes: Buffer.from(await response.arrayBuffer()),
+      contentType: imageContentType(objectPath),
+    };
   }
 
   async removePaymentProof(proofPath: string | null): Promise<void> {
     if (!proofPath) return;
-    const [directory, filename, ...extraParts] = proofPath.split('/');
-    if (
-      directory !== 'payment-proofs' ||
-      extraParts.length > 0 ||
-      !filename ||
-      !storedFilenamePattern.test(filename)
-    ) {
-      throw new ImageValidationError('Invalid stored payment proof path');
-    }
-    await unlink(resolve(paymentProofsDirectory, filename));
+    const objectPath = paymentProofObjectPath(proofPath);
+    await storageRequest(
+      'DELETE',
+      env.SUPABASE_PAYMENT_PROOFS_BUCKET,
+      objectPath,
+      JSON.stringify({ prefixes: [objectPath] }),
+      'application/json',
+    );
   }
 }
 
-export const imageStorage: ImageStorageService = new LocalImageStorageService();
+export const imageStorage: ImageStorageService = new SupabaseImageStorageService();

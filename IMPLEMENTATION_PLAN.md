@@ -60,19 +60,36 @@ Use a TypeScript-first stack.
 -   Node.js
 -   Fastify
 -   TypeScript
--   PostgreSQL
--   Prisma ORM
+-   Supabase-hosted PostgreSQL
+-   Drizzle ORM with the `postgres` (postgres.js) driver
 -   Zod or Fastify-compatible schema validation for request validation
 -   Socket.IO hosted on the same HTTP server as Fastify
--   `@fastify/multipart` for image and payment-proof uploads
--   `@fastify/static` for serving local uploaded files
+-   Supabase Storage for public product/QR images and private payment proofs
+-   Supabase Storage REST API only for object operations; use direct PostgreSQL
+    connections for application queries, not Supabase's data API
+-   Drizzle Kit for versioned SQL migrations
 -   Secure HTTP-only cookie sessions for owner authentication
+
+### Hosting and production configuration
+
+-   Render Web Service for the Fastify and Socket.IO API.
+-   Render Static Site for the React/Vite frontend.
+-   Supabase transaction-pooler URL for Render runtime connections.
+-   Use `prepare: false` with postgres.js over the transaction pooler.
+-   Use a direct PostgreSQL URL for Drizzle Kit migrations when supported;
+    otherwise use Supabase's session pooler.
+-   Backend-only Supabase service-role credentials. Never expose this key to
+    Vite or browser code.
+-   Environment variables for database URLs, Supabase Storage, API origin,
+    frontend origin, and owner seed credentials. Do not commit credentials.
+-   Keep one backend instance so Socket.IO rooms remain shared in process.
 
 ### Development and quality
 
 -   ESLint and Prettier
 -   Environment variables managed through `.env`
--   Prisma migrations and seed scripts
+-   Drizzle Kit SQL migrations and seed scripts
+-   Infer database row and insert types from Drizzle table definitions
 -   Vitest for unit/integration tests where practical
 -   Playwright for critical end-to-end flows if time allows
 
@@ -96,33 +113,40 @@ ordertaker/
 │   │   └── routes/
 │   └── ...
 ├── backend/
-│   ├── prisma/
-│   ├── public/
-│   │   └── uploads/
-│   │       ├── products/
-│   │       └── payment-proofs/
+│   ├── drizzle/
+│   │   ├── meta/
+│   │   └── *.sql
 │   ├── src/
 │   │   ├── config/
+│   │   ├── db/
+│   │   │   ├── schema/
+│   │   │   │   ├── auth.ts
+│   │   │   │   ├── catalog.ts
+│   │   │   │   ├── orders.ts
+│   │   │   │   ├── payments.ts
+│   │   │   │   ├── messaging.ts
+│   │   │   │   ├── settings.ts
+│   │   │   │   └── index.ts
+│   │   │   └── index.ts
 │   │   ├── plugins/
-│   │   ├── modules/
-│   │   │   ├── auth/
-│   │   │   ├── products/
-│   │   │   ├── categories/
-│   │   │   ├── orders/
-│   │   │   ├── payments/
-│   │   │   ├── messages/
-│   │   │   └── settings/
-│   │   ├── realtime/
+│   │   │   └── database.ts
+│   │   ├── routes/
 │   │   ├── services/
 │   │   └── server.ts
 │   └── ...
+├── backend/drizzle.config.ts
+├── render.yaml
 ├── docs/
 ├── .gitignore
 └── README.md
 ```
 
-Keep module boundaries practical. Do not create a separate service or
-deployable application for each module.
+Keep feature queries in existing route/service boundaries. Put reusable
+database initialization and typed schema in `src/db/`; expose the Drizzle
+instance through one Fastify database plugin. The plugin owns the postgres.js
+pool lifecycle and decorates Fastify with the typed database. Add the required
+Fastify type augmentation. Keep all database access in the backend. Do not
+create separate services.
 
 ------------------------------------------------------------------------
 
@@ -535,8 +559,9 @@ can be deferred.
 
 ## 9. Real-Time Updates
 
-Use Socket.IO on the same Node.js HTTP server as Fastify. Do not create
-a separate real-time service for this POC.
+Use Socket.IO on the same Node.js HTTP server as Fastify. Render forwards
+WebSocket upgrades to the API service; use the existing Socket.IO path and
+HTTPS service URL. Do not create a separate real-time service for this POC.
 
 Real-time events should cover:
 
@@ -561,16 +586,116 @@ Security requirements:
 -   Never trust a client-supplied order ID alone as proof of access.
 -   Do not broadcast private customer/order details to public rooms.
 
-REST endpoints and PostgreSQL remain the source of truth. On socket
-events, clients should update or invalidate TanStack Query data. The app
-must still work if a socket disconnects; clients can refetch through
-REST.
+REST endpoints and Supabase PostgreSQL remain the source of truth. On socket
+events, clients should update or invalidate TanStack Query data. Keep one API
+instance unless a shared Socket.IO adapter is deliberately introduced. The app
+must still work if a socket disconnects; clients can refetch through REST.
 
 ------------------------------------------------------------------------
 
 ## 10. Database Design
 
-Use PostgreSQL and Prisma migrations.
+Use Supabase-hosted PostgreSQL with Drizzle ORM and the `postgres` driver.
+Configure runtime connections with Supabase's transaction pooler through
+`DATABASE_URL`. Initialize postgres.js with `prepare: false` and a bounded pool.
+Configure Drizzle Kit with `DIRECT_URL` for migrations when direct connectivity
+is supported; otherwise use Supabase's session pooler on port 5432.
+
+Define PostgreSQL enums with `pgEnum` and tables with `pgTable` in TypeScript
+under `src/db/schema/`. Define Drizzle `relations`, database foreign keys,
+unique constraints, and indexes explicitly. Export row and
+insert types from table definitions with `$inferSelect` and `$inferInsert`; do
+not maintain parallel handwritten database interfaces.
+
+Use these enum values:
+
+``` text
+UserRole: OWNER
+FulfillmentType: DELIVERY, PICKUP
+OrderStatus: PENDING, IN_KITCHEN, OUT_FOR_DELIVERY, READY_FOR_PICKUP,
+             DELIVERED, PICKED_UP, CANCELLED
+PaymentMethod: COD, QR
+PaymentStatus: UNPAID, AWAITING_VERIFICATION, PAID, REJECTED, REFUNDED
+PaymentActorType: CUSTOMER, OWNER, SYSTEM
+MessageSenderType: CUSTOMER, OWNER
+```
+
+Keep schema definitions grouped by feature in `src/db/schema/`. Keep generated
+SQL migrations and Drizzle Kit metadata under `backend/drizzle/`, and commit
+both. Generate database types from these definitions; do not generate or ship a
+separate runtime ORM client.
+
+Use the existing domain tables: `users`, `admin_sessions`, `categories`,
+`products`, `orders`, `order_items`, `payments`,
+`payment_status_histories`, `order_status_histories`, `messages`, and
+`store_settings`. Preserve current enum values and delete behaviors. Use
+`numeric(10, 2)` for money and preserve exact arithmetic; Drizzle returns
+numeric values as strings, so convert to integer cents or use decimal-safe
+calculations rather than JavaScript floating-point arithmetic.
+
+`admin_sessions` must keep a unique token hash, cascade on user deletion, and
+index `(user_id, expires_at)`. Keep unique constraints on user email,
+category name/slug, product slug, order number, tracking-token hash, and
+idempotency-key hash. Index order status/date, fulfillment/date, payment
+status/date, and child foreign keys. Keep a unique payment per order. Use
+`onDelete` actions that preserve historical order items and nullable audit
+actors, matching current behavior.
+
+Configure `drizzle.config.ts` with the schema glob, `backend/drizzle` output,
+PostgreSQL dialect, and migration connection URL. Use `drizzle-kit generate`
+to create migrations and review generated SQL before applying it. The
+`db:deploy` script applies committed migrations and safely baselines a complete
+existing schema. Do not use schema push in production.
+
+Provide backend scripts such as `db:generate` (`drizzle-kit generate`),
+`db:migrate` (apply committed SQL through Drizzle's migrator), `db:deploy`
+(baseline/migration entry point), and `db:seed` (the TypeScript seed command).
+Root workspace scripts should forward to these backend scripts. Generate
+migrations when schema changes; normal setup applies committed migrations and
+does not regenerate them.
+
+The deployment script detects an empty database and applies migrations. It
+baselines a complete existing schema only after checking required tables,
+enums, and product foreign key. It refuses partial schemas for manual review.
+The initial migration is never replayed against a complete existing database.
+Legacy SQL history is archived under `backend/drizzle/legacy-sql/`; Drizzle
+does not execute those files.
+
+### Drizzle setup and migration workflow
+
+1. Copy `.env.example` to `.env`. Set runtime `DATABASE_URL` to Supabase's
+   transaction-pooler URI, `DIRECT_URL` to its direct or session-pooler URI,
+   plus the backend-only Storage credentials and bucket names.
+2. Install locked dependencies with `npm ci`.
+3. Apply committed SQL migrations with `npm run db:migrate`.
+4. Seed the owner and initial catalog with `npm run db:seed`.
+5. Start both applications with `npm run dev`.
+
+When schema definitions change, run `npm run db:generate`, inspect the SQL
+under `backend/drizzle/`, and commit the SQL and metadata together. Apply the
+migration locally and in staging before production. Do not run generation as a
+production build step.
+
+The database plugin creates the runtime client with
+`drizzle(postgres(DATABASE_URL, { prepare: false, max: 5 }), { schema })` and
+closes the postgres.js pool when Fastify shuts down. Drizzle Kit reads
+`DIRECT_URL` for migration operations. The frontend receives only `VITE_API_URL`.
+
+### ORM migration status
+
+The backend now uses Drizzle and postgres.js for every database query.
+Obsolete ORM runtime/configuration dependencies and schema assets are removed.
+The old SQL migration history remains archived under
+`backend/drizzle/legacy-sql/`; it is not part of the active migration journal.
+Database access is centralized in the Fastify plugin, and route
+transactions preserve atomic checkout and audit-history updates.
+
+PGlite integration tests and TypeScript builds pass locally. Live Supabase
+migration and Render startup validation still require provider credentials and
+remain deployment steps.
+
+Do not add `@supabase/supabase-js` for database access. Supabase Storage remains
+separate from PostgreSQL and uses the existing backend-only Storage API service.
 
 The following is a starting point, not a requirement to use these exact
 column names. Add indexes, constraints, and relations as appropriate.
@@ -588,6 +713,19 @@ role
 created_at
 updated_at
 ```
+
+### `admin_sessions`
+
+``` text
+id
+token_hash
+user_id
+expires_at
+created_at
+```
+
+Use a unique index on `token_hash`, a cascading foreign key to `users`, and an
+index on `(user_id, expires_at)`.
 
 ### `categories`
 
@@ -635,6 +773,7 @@ subtotal
 delivery_fee
 total
 tracking_token_hash
+idempotency_key_hash   nullable
 created_at
 updated_at
 ```
@@ -674,6 +813,22 @@ verified_by              nullable
 rejection_reason         nullable
 created_at
 updated_at
+```
+
+Enforce one payment per order. Keep the payment method/status and receipt
+object key on the payment row; never persist receipt bytes.
+
+### `payment_status_histories`
+
+``` text
+id
+payment_id
+old_status               nullable
+new_status
+actor_type
+changed_by_user_id       nullable
+note                     nullable
+created_at
 ```
 
 ### `order_status_histories`
@@ -721,10 +876,21 @@ integration is introduced.
 
 ### Database rules
 
--   Use `DECIMAL`/Prisma `Decimal` for money. Do not use floating-point
+-   Use PostgreSQL `numeric` for money and exact integer-cent or
+    decimal-safe application calculations. Do not use floating-point
     types for currency calculations.
 -   Use transactions for order creation and status/payment changes that
     must remain consistent.
+-   Use Drizzle `db.transaction()` and pass its transaction handle into the
+    feature service/repository. Create the order, order items, payment, and
+    initial history records atomically. Use serializable isolation for checkout
+    where product availability and totals must be revalidated together.
+-   Keep each payment/order state change and its history record in the same
+    transaction. Prefer schema constraints and conditional updates for
+    concurrency-sensitive state transitions.
+-   Use Drizzle's parameterized `sql` template for PostgreSQL-specific queries.
+    Add reviewed database-specific functions or triggers through committed SQL
+    migrations when application transactions are insufficient.
 -   Add indexes for order number, order status, creation date, payment
     status, and relevant foreign keys.
 -   Use database constraints for unique values and valid relations.
@@ -738,35 +904,29 @@ integration is introduced.
 
 ## 11. Image and File Storage
 
-For the POC, store uploads on the application server's filesystem.
-
-Suggested locations:
-
-``` text
-backend/public/uploads/products/
-backend/public/uploads/payment-proofs/
-```
+Use Supabase Storage. Create a public `product-images` bucket for product and
+store QR images, and a private `payment-proofs` bucket for customer receipts.
+Use `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`,
+`SUPABASE_PRODUCT_BUCKET`, and `SUPABASE_PAYMENT_PROOFS_BUCKET` on the backend.
+Never expose the service-role key in frontend variables or browser code.
 
 Implementation requirements:
 
--   Use `@fastify/multipart`.
--   Validate file size and actual file type; do not trust the filename
-    or browser-provided MIME type alone.
+-   Validate size and actual image signatures on the backend; do not trust
+    browser-provided MIME types.
 -   Generate unique server-side filenames.
--   Do not use user-supplied filenames as filesystem paths.
 -   Restrict product image uploads to authenticated admins.
--   Restrict payment-proof uploads to the order's authorized guest or
-    admin.
--   Store relative file paths in PostgreSQL, not image binary data.
--   Avoid exposing private payment proofs as unrestricted public static
-    files. Serve them through an authorization-checked endpoint.
--   Consider resizing images and converting them to WebP.
--   Clean up replaced or orphaned files safely.
--   Back up uploaded files together with the database.
-
-Create an `ImageStorageService` abstraction so local storage can later
-be replaced by S3-compatible storage or Cloudinary without changing
-product/order business logic.
+-   Accept customer payment proofs only through tracking-token-authorized
+    backend endpoints. Serve proofs only through owner-authorized endpoints.
+-   Store object keys or public image URLs in PostgreSQL, not image bytes.
+-   Keep payment proofs in the private bucket; never expose public URLs or
+    anonymous access to proof objects.
+-   Use the backend service-role credential only on the API. Apply authorization
+    before each proof read.
+-   Clean up replaced objects safely and back up Supabase Storage separately
+    from database backups.
+-   Before migrating an existing installation, transfer local objects and
+    update stored image URLs/object paths.
 
 ------------------------------------------------------------------------
 
@@ -869,7 +1029,7 @@ consistent as implementation proceeds.
 -   [ ] Do not log passwords, session secrets, raw tracking tokens, or
     sensitive payment data.
 -   [ ] Keep secrets and real credentials out of Git.
--   [ ] Back up PostgreSQL and uploaded files.
+-   [ ] Configure and test Supabase database and Storage backups.
 -   [ ] Add basic operational logging and a health-check endpoint.
 
 ------------------------------------------------------------------------
@@ -879,22 +1039,49 @@ consistent as implementation proceeds.
 Build and test in small vertical slices. Do not ask a coding agent to
 generate the entire application in one pass.
 
-### Phase 1 --- Project foundation
+Existing storefront and owner features remain in place. Drizzle persistence
+conversion is implemented; validate provider-specific deployment before
+production.
+
+### Phase 1 --- Drizzle database foundation
 
 -   [x] Create frontend and backend projects.
 -   [x] Configure TypeScript, linting, formatting, and environment
     variables.
--   [x] Set up PostgreSQL and Prisma.
--   [x] Create the initial Prisma schema and migration.
--   [x] Add seed scripts for the owner, categories, products, and store
-    settings.
+-   [x] Add a typed Drizzle database module and Fastify plugin with pool shutdown.
+-   [x] Configure pooled runtime and direct migration connection URLs.
+-   [x] Define enums, tables, relations, constraints, and indexes in Drizzle
+    schema files.
+-   [x] Generate and commit SQL migrations with Drizzle Kit.
+-   [x] Add guarded baseline behavior for complete existing schemas; preserve
+    legacy SQL history.
+-   [x] Port seed scripts to Drizzle.
 -   [x] Set up Fastify plugins, centralized error handling, and health
     check.
 -   [x] Set up React Router, Tailwind, and TanStack Query.
 -   [x] Confirm frontend can call the backend locally.
 
-**Done when:** both apps run locally, the database migrates and seeds
-successfully, and the frontend can fetch a test endpoint.
+**Done when:** PGlite migrations and tests pass. Live Supabase validation
+remains required before production.
+
+### Phase 1B --- Port existing persistence incrementally
+
+The current features already exist. Preserve their behavior and port only
+database access, one feature slice at a time:
+
+-   [x] Port owner authentication and admin-session queries.
+-   [x] Port category and product queries while preserving public image URLs.
+-   [x] Port checkout, tracking, order-status, and history queries.
+-   [x] Keep order, items, payment, and initial histories in one Drizzle
+    transaction with serializable isolation.
+-   [x] Port payment review, COD collection, and payment-history queries while
+    keeping proof objects private.
+-   [x] Port message and store-setting queries without changing Socket.IO
+    authorization or event behavior.
+-   [x] Add PGlite integration coverage for transactions, authorization, and
+    Socket.IO database access; remove obsolete runtime ORM code.
+
+Do not rewrite frontend features or API contracts during this ORM migration.
 
 ### Phase 2 --- Admin authentication and product management
 
@@ -903,8 +1090,7 @@ successfully, and the frontend can fetch a test endpoint.
 -   [x] Protect admin routes on the backend.
 -   [x] Implement category CRUD.
 -   [x] Implement product CRUD and archive/availability behavior.
--   [x] Implement local product image upload and authorized image
-    serving.
+-   [x] Implement Supabase product image upload and public image serving.
 -   [x] Build the admin product/category screens.
 -   [x] Build the public product catalog endpoint and storefront.
 
@@ -918,7 +1104,7 @@ can browse active products.
 -   [x] Conditionally display delivery address fields.
 -   [x] Display pickup address and instructions for pickup orders.
 -   [x] Implement COD and QR payment selection.
--   [x] Require and privately store a QR payment receipt during checkout.
+-   [x] Require and privately store a QR payment receipt in Supabase Storage.
 -   [x] Validate checkout data on the backend.
 -   [x] Recalculate product prices and delivery fee on the backend.
 -   [x] Create orders, order items, and initial payment records in a
@@ -991,17 +1177,36 @@ disconnect.
 -   [x] Test upload validation and private payment-proof access.
 -   [x] Test admin route and socket authorization.
 -   [ ] Test mobile layouts and common error/empty/loading states.
--   [ ] Configure production environment variables and HTTPS.
--   [ ] Configure database and upload backups.
--   [x] Document setup, migrations, seed process, deployment, and owner
-    usage.
+-   [ ] Deploy the API as a Render Web Service and frontend as a Render
+    Static Site.
+-   [ ] Configure Render environment variables, Supabase URLs/buckets, HTTPS,
+    exact CORS origin, and production seed credentials.
+-   [ ] Verify WebSocket upgrades and authenticated private proof access.
+-   [ ] Configure database and Storage backups.
+-   [ ] Build the API with `npm ci --include=dev` and
+    `npm run build -w @ordertaker/backend`; Drizzle needs no generated client.
+-   [ ] Apply committed migrations before server startup with
+    `npm run db:migrate -w @ordertaker/backend`.
+-   [x] Configure Drizzle Kit migrations to use `DIRECT_URL`; keep runtime
+    connections on Supabase's pooled `DATABASE_URL`.
+-   [x] Update README setup and Render migration commands for Drizzle.
 
 **Done when:** the application is deployed, the owner can operate it,
 and critical security and ordering flows have been tested.
 
-Deployment, HTTPS provisioning, automated backup scheduling, and the manual
-mobile/browser acceptance pass remain pending until a hosting provider is
-selected and those environment-specific steps are completed.
+Render and Supabase configuration files and instructions are included.
+Deployment, HTTPS provisioning, backup scheduling, and the manual
+mobile/browser acceptance pass remain pending until configured and verified
+in the hosting accounts.
+
+For Render, build the API with `npm ci --include=dev && npm run build -w
+@ordertaker/backend`. Start it with `npm run db:deploy -w @ordertaker/backend
+&& npm run start -w @ordertaker/backend`. Build the static site with `npm ci
+--include=dev && npm run build -w @ordertaker/frontend`, and publish
+`frontend/dist`. Configure `DATABASE_URL`, `DIRECT_URL`, `SUPABASE_URL`,
+`SUPABASE_SERVICE_ROLE_KEY`, bucket names, `FRONTEND_ORIGIN`, and owner seed
+values only on the backend. Set only `VITE_API_URL` on the static site. Never
+pass database or service-role credentials to Vite.
 
 ------------------------------------------------------------------------
 
@@ -1050,26 +1255,25 @@ For each task:
 8.  Update this plan when a deliberate scope or architecture decision
     changes.
 
-### Suggested first Codex task
+### Suggested deployment verification task
 
 ``` text
 Read IMPLEMENTATION_PLAN.md and inspect the repository.
 
-Implement Phase 1 only: project foundation.
+The application now uses Drizzle with Supabase PostgreSQL and Render. Verify
+the migration and hosting configuration against an operator-provided Supabase
+staging project. Never print, commit, or send credentials to external services.
 
-Use the stack and repository structure described in the plan. Set up the
-React/Vite/TypeScript frontend, Fastify/TypeScript backend, PostgreSQL,
-Prisma, environment configuration, initial schema/migration, seed scripts,
-centralized backend error handling, health-check endpoint, and frontend
-API connectivity.
+Confirm `DATABASE_URL` uses the transaction pooler and `DIRECT_URL` uses the
+direct or session pooler. Back up the staging database, run `npm run db:deploy`,
+and verify a new database applies committed migrations. Also verify the safe
+baseline path against an existing complete schema and confirm partial schemas
+stop without writes. Check order transactions, private proof authorization,
+owner sessions, and Socket.IO through Render.
 
-Do not implement product management, checkout, orders, payments, sockets,
-or dashboard features yet.
-
-Before making changes, summarize the implementation steps and files you
-expect to create. After implementation, run the available type checks,
-linting, migrations, and tests. Report commands run, results, and any
-remaining setup steps. Do not invent credentials or commit .env files.
+Do not modify application contracts or features unless validation finds a
+specific regression. Report exact commands, outcomes, and remaining provider
+setup. Never invent credentials or modify production data.
 ```
 
 ------------------------------------------------------------------------
@@ -1091,6 +1295,8 @@ The first usable release is complete when:
 -   Customers can securely track their orders.
 -   Customers and the owner can exchange order-related messages.
 -   Important order, payment, and message updates work in real time.
+-   Production frontend and API deploy on Render, with Supabase PostgreSQL
+    and Storage configured through secrets and environment variables.
 -   Critical access-control, validation, and order-calculation tests
     pass.
 

@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useState } from 'react';
 import { Link } from 'react-router-dom';
-import { apiRequest, apiUrl, jsonBody } from '../../api';
+import { apiRequest, jsonBody } from '../../api';
 import type { Category, Owner, Product } from '../../types';
 import { useOwnerRealtime } from '../../utils';
 import { ErrorNotice } from '../shared/ErrorNotice';
@@ -189,7 +189,7 @@ export function AdminDashboard({ owner }: { owner: Owner }) {
                         {product.imagePath ? (
                           <img
                             className="h-16 w-16 rounded-lg object-cover"
-                            src={`${apiUrl}${product.imagePath}`}
+                            src={product.imagePath}
                             alt=""
                           />
                         ) : (

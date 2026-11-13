@@ -1,8 +1,19 @@
 import { createHash, randomBytes } from 'node:crypto';
-import { Prisma } from '@prisma/client';
+import { and, eq, inArray, asc } from 'drizzle-orm';
 import { z } from 'zod';
 import type { FastifyPluginAsync, FastifyReply } from 'fastify';
-import { prisma } from '../db.js';
+import {
+  categories,
+  messages,
+  orderItems,
+  orderStatusHistories,
+  orders,
+  paymentStatusHistories,
+  payments,
+  products,
+  storeSettings,
+} from '../db/schema/index.js';
+import { isSerializationFailure, isUniqueViolation } from '../db/errors.js';
 import { consumeMessageAttempt, consumeOrderAttempt } from '../rate-limit.js';
 import { ImageValidationError, imageStorage } from '../services/image-storage.js';
 import { publishNewMessage, publishOrderCreated, publishOrderUpdated } from '../realtime.js';
@@ -108,8 +119,8 @@ function moneyToCents(value: string | number): number | null {
   return Number.isSafeInteger(cents) ? cents : null;
 }
 
-function centsToDecimal(cents: number): Prisma.Decimal {
-  return new Prisma.Decimal(`${Math.floor(cents / 100)}.${String(cents % 100).padStart(2, '0')}`);
+function centsToDecimal(cents: number): string {
+  return `${Math.floor(cents / 100)}.${String(cents % 100).padStart(2, '0')}`;
 }
 
 function createOrderNumber(): string {
@@ -132,9 +143,9 @@ export const orderRoutes: FastifyPluginAsync = async (app) => {
       return reply.code(404).send({ error: 'Order not found' });
     }
 
-    const order = await prisma.order.findUnique({
-      where: { trackingTokenHash: hashValue(request.params.token) },
-      select: {
+    const order = await app.db.query.orders.findFirst({
+      where: eq(orders.trackingTokenHash, hashValue(request.params.token)),
+      columns: {
         orderNumber: true,
         customerName: true,
         customerPhone: true,
@@ -149,33 +160,37 @@ export const orderRoutes: FastifyPluginAsync = async (app) => {
         deliveryFee: true,
         total: true,
         createdAt: true,
+      },
+      with: {
         items: {
-          select: { productName: true, quantity: true, unitPrice: true, lineTotal: true },
-          orderBy: { createdAt: 'asc' },
+          columns: { productName: true, quantity: true, unitPrice: true, lineTotal: true },
+          orderBy: [asc(orderItems.createdAt)],
         },
         payment: {
-          select: {
+          columns: {
             method: true,
             status: true,
             amount: true,
             referenceNumber: true,
             rejectionReason: true,
             verifiedAt: true,
+          },
+          with: {
             statusHistory: {
-              select: {
+              columns: {
                 oldStatus: true,
                 newStatus: true,
                 actorType: true,
                 note: true,
                 createdAt: true,
               },
-              orderBy: { createdAt: 'asc' },
+              orderBy: [asc(paymentStatusHistories.createdAt)],
             },
           },
         },
         statusHistory: {
-          select: { oldStatus: true, newStatus: true, note: true, createdAt: true },
-          orderBy: { createdAt: 'asc' },
+          columns: { oldStatus: true, newStatus: true, note: true, createdAt: true },
+          orderBy: [asc(orderStatusHistories.createdAt)],
         },
       },
     });
@@ -183,9 +198,10 @@ export const orderRoutes: FastifyPluginAsync = async (app) => {
 
     const pickupSettings =
       order.fulfillmentType === 'PICKUP'
-        ? await prisma.storeSetting.findMany({
-            where: { key: { in: ['pickup_address', 'pickup_instructions'] } },
-          })
+        ? await app.db
+            .select()
+            .from(storeSettings)
+            .where(inArray(storeSettings.key, ['pickup_address', 'pickup_instructions']))
         : [];
     const pickupValues = new Map(pickupSettings.map((setting) => [setting.key, setting.value]));
 
@@ -208,16 +224,18 @@ export const orderRoutes: FastifyPluginAsync = async (app) => {
       if (!/^[A-Za-z0-9_-]{43}$/.test(request.params.token)) {
         return reply.code(404).send({ error: 'Order not found' });
       }
-      const order = await prisma.order.findUnique({
-        where: { trackingTokenHash: hashValue(request.params.token) },
-        select: { id: true },
-      });
+      const [order] = await app.db
+        .select({ id: orders.id })
+        .from(orders)
+        .where(eq(orders.trackingTokenHash, hashValue(request.params.token)))
+        .limit(1);
       if (!order) return reply.code(404).send({ error: 'Order not found' });
-      return prisma.message.findMany({
-        where: { orderId: order.id },
-        orderBy: { createdAt: 'asc' },
-        take: 200,
-      });
+      return app.db
+        .select()
+        .from(messages)
+        .where(eq(messages.orderId, order.id))
+        .orderBy(asc(messages.createdAt))
+        .limit(200);
     },
   );
 
@@ -236,20 +254,22 @@ export const orderRoutes: FastifyPluginAsync = async (app) => {
       if (!parsed.success) {
         return reply.code(400).send({ error: 'Invalid message', details: parsed.error.issues });
       }
-      const order = await prisma.order.findUnique({
-        where: { trackingTokenHash: hashValue(request.params.token) },
-        select: { id: true, customerName: true },
-      });
+      const [order] = await app.db
+        .select({ id: orders.id, customerName: orders.customerName })
+        .from(orders)
+        .where(eq(orders.trackingTokenHash, hashValue(request.params.token)))
+        .limit(1);
       if (!order) return reply.code(404).send({ error: 'Order not found' });
 
-      const message = await prisma.message.create({
-        data: {
+      const [message] = await app.db
+        .insert(messages)
+        .values({
           orderId: order.id,
           senderType: 'CUSTOMER',
           senderName: order.customerName,
           message: parsed.data.message,
-        },
-      });
+        })
+        .returning();
       publishNewMessage(order.id, message);
       return reply.code(201).send(message);
     },
@@ -281,39 +301,54 @@ export const orderRoutes: FastifyPluginAsync = async (app) => {
       let committed = false;
       try {
         newProofPath = await imageStorage.savePaymentProof(parsed.data.paymentReceipt.data);
-        const result = await prisma.$transaction(
+        const result = await app.db.transaction(
           async (transaction) => {
-            const payment = await transaction.payment.findFirst({
-              where: {
-                method: 'QR',
-                order: { trackingTokenHash: hashValue(request.params.token) },
-              },
-              select: { id: true, orderId: true, status: true, proofImagePath: true },
-            });
+            const [payment] = await transaction
+              .select({
+                id: payments.id,
+                orderId: payments.orderId,
+                status: payments.status,
+                proofImagePath: payments.proofImagePath,
+              })
+              .from(payments)
+              .innerJoin(orders, eq(payments.orderId, orders.id))
+              .where(
+                and(
+                  eq(payments.method, 'QR'),
+                  eq(orders.trackingTokenHash, hashValue(request.params.token)),
+                ),
+              )
+              .limit(1);
             if (!payment) return { kind: 'missing' as const };
             if (payment.status !== 'REJECTED') return { kind: 'invalid' as const };
 
-            const updated = await transaction.payment.updateMany({
-              where: { id: payment.id, method: 'QR', status: 'REJECTED' },
-              data: {
+            const updated = await transaction
+              .update(payments)
+              .set({
                 status: 'AWAITING_VERIFICATION',
                 referenceNumber: parsed.data.referenceNumber?.trim() || null,
                 proofImagePath: newProofPath,
                 verifiedAt: null,
                 verifiedById: null,
                 rejectionReason: null,
-              },
-            });
-            if (updated.count !== 1) return { kind: 'conflict' as const };
+                updatedAt: new Date(),
+              })
+              .where(
+                and(
+                  eq(payments.id, payment.id),
+                  eq(payments.method, 'QR'),
+                  eq(payments.status, 'REJECTED'),
+                ),
+              )
+              .returning({ id: payments.id });
+            if (updated.length !== 1) return { kind: 'conflict' as const };
 
-            await transaction.paymentStatusHistory.create({
-              data: {
-                paymentId: payment.id,
-                oldStatus: 'REJECTED',
-                newStatus: 'AWAITING_VERIFICATION',
-                actorType: 'CUSTOMER',
-                note: 'Customer submitted an updated receipt and optional reference number.',
-              },
+            await transaction.insert(paymentStatusHistories).values({
+              paymentId: payment.id,
+              oldStatus: 'REJECTED',
+              newStatus: 'AWAITING_VERIFICATION',
+              actorType: 'CUSTOMER',
+              note: 'Customer submitted an updated receipt and optional reference number.',
             });
             return {
               kind: 'success' as const,
@@ -321,7 +356,7 @@ export const orderRoutes: FastifyPluginAsync = async (app) => {
               previousProofPath: payment.proofImagePath,
             };
           },
-          { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
+          { isolationLevel: 'serializable' },
         );
 
         if (result.kind === 'missing') return reply.code(404).send({ error: 'Order not found' });
@@ -348,7 +383,7 @@ export const orderRoutes: FastifyPluginAsync = async (app) => {
         }
         return { status: 'AWAITING_VERIFICATION' };
       } catch (error) {
-        if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2034') {
+        if (isSerializationFailure(error)) {
           return reply
             .code(409)
             .send({ error: 'Payment status changed concurrently. Refresh and retry.' });
@@ -389,10 +424,11 @@ export const orderRoutes: FastifyPluginAsync = async (app) => {
 
     const data: CheckoutData = parsed.data;
     const idempotencyKeyHash = hashValue(keyResult.data.toLowerCase());
-    const existing = await prisma.order.findUnique({
-      where: { idempotencyKeyHash },
-      select: { orderNumber: true },
-    });
+    const [existing] = await app.db
+      .select({ orderNumber: orders.orderNumber })
+      .from(orders)
+      .where(eq(orders.idempotencyKeyHash, idempotencyKeyHash))
+      .limit(1);
     if (existing) {
       return reply.send({ duplicate: true, orderNumber: existing.orderNumber });
     }
@@ -404,32 +440,39 @@ export const orderRoutes: FastifyPluginAsync = async (app) => {
         paymentProofPath = await imageStorage.savePaymentProof(data.paymentReceipt.data);
       }
 
-      const created = await prisma.$transaction(
+      const created = await app.db.transaction(
         async (transaction) => {
-          const products = await transaction.product.findMany({
-            where: {
-              id: { in: productIds },
-              isAvailable: true,
-              isArchived: false,
-              category: { isActive: true },
-            },
-            select: { id: true, name: true, price: true },
-          });
-          if (products.length !== productIds.length) return null;
+          const availableProducts = await transaction
+            .select({
+              id: products.id,
+              name: products.name,
+              price: products.price,
+            })
+            .from(products)
+            .innerJoin(categories, eq(products.categoryId, categories.id))
+            .where(
+              and(
+                inArray(products.id, productIds),
+                eq(products.isAvailable, true),
+                eq(products.isArchived, false),
+                eq(categories.isActive, true),
+              ),
+            );
+          if (availableProducts.length !== productIds.length) return null;
 
-          const productById = new Map(products.map((product) => [product.id, product]));
-          const orderItems: Array<{
+          const productById = new Map(availableProducts.map((product) => [product.id, product]));
+          const itemsToInsert: Array<{
             productId: string;
             productName: string;
             quantity: number;
-            unitPriceCents: number;
-            lineTotalCents: number;
+            unitPrice: string;
+            lineTotal: string;
           }> = [];
           let subtotalCents = 0;
           for (const item of data.items) {
             const product = productById.get(item.productId);
             if (!product) return null;
-            const unitPriceCents = moneyToCents(product.price.toFixed(2));
+            const unitPriceCents = moneyToCents(product.price);
             if (unitPriceCents === null || unitPriceCents <= 0) {
               throw new Error(`Product ${product.id} has an invalid configured price`);
             }
@@ -438,19 +481,23 @@ export const orderRoutes: FastifyPluginAsync = async (app) => {
             if (!Number.isSafeInteger(subtotalCents) || subtotalCents > maxOrderAmountCents) {
               throw new OrderAmountError('Order total exceeds the supported maximum');
             }
-            orderItems.push({
+            itemsToInsert.push({
               productId: product.id,
               productName: product.name,
               quantity: item.quantity,
-              unitPriceCents,
-              lineTotalCents,
+              unitPrice: centsToDecimal(unitPriceCents),
+              lineTotal: centsToDecimal(lineTotalCents),
             });
           }
 
-          const deliveryFeeSetting =
+          const [deliveryFeeSetting] =
             data.fulfillmentType === 'DELIVERY'
-              ? await transaction.storeSetting.findUnique({ where: { key: 'delivery_fee' } })
-              : null;
+              ? await transaction
+                  .select({ value: storeSettings.value })
+                  .from(storeSettings)
+                  .where(eq(storeSettings.key, 'delivery_fee'))
+                  .limit(1)
+              : [];
           const rawDeliveryFee = deliveryFeeSetting?.value;
           const deliveryFeeCents =
             data.fulfillmentType === 'PICKUP'
@@ -472,8 +519,9 @@ export const orderRoutes: FastifyPluginAsync = async (app) => {
 
           const trackingToken = createTrackingToken();
           const paymentStatus = data.paymentMethod === 'QR' ? 'AWAITING_VERIFICATION' : 'UNPAID';
-          const order = await transaction.order.create({
-            data: {
+          const [order] = await transaction
+            .insert(orders)
+            .values({
               orderNumber: createOrderNumber(),
               customerName: data.customerName,
               customerPhone: data.customerPhone,
@@ -491,60 +539,64 @@ export const orderRoutes: FastifyPluginAsync = async (app) => {
               total: centsToDecimal(totalCents),
               trackingTokenHash: hashValue(trackingToken),
               idempotencyKeyHash,
-              items: {
-                create: orderItems.map((item) => ({
-                  productId: item.productId,
-                  productName: item.productName,
-                  quantity: item.quantity,
-                  unitPrice: centsToDecimal(item.unitPriceCents),
-                  lineTotal: centsToDecimal(item.lineTotalCents),
-                })),
-              },
-              payment: {
-                create: {
-                  method: data.paymentMethod,
-                  status: paymentStatus,
-                  amount: centsToDecimal(totalCents),
-                  referenceNumber:
-                    data.paymentMethod === 'QR' ? data.referenceNumber?.trim() || null : null,
-                  proofImagePath: paymentProofPath,
-                  statusHistory: {
-                    create: {
-                      newStatus: paymentStatus,
-                      actorType: data.paymentMethod === 'QR' ? 'CUSTOMER' : 'SYSTEM',
-                      note:
-                        data.paymentMethod === 'QR'
-                          ? 'Customer submitted payment proof at checkout.'
-                          : 'Cash payment is due at delivery or pickup.',
-                    },
-                  },
-                },
-              },
-              statusHistory: { create: { newStatus: 'PENDING' } },
-            },
-            include: { items: true },
+              updatedAt: new Date(),
+            })
+            .returning();
+
+          const insertedItems = await transaction
+            .insert(orderItems)
+            .values(itemsToInsert.map((item) => ({ ...item, orderId: order.id })))
+            .returning();
+          const [payment] = await transaction
+            .insert(payments)
+            .values({
+              orderId: order.id,
+              method: data.paymentMethod,
+              status: paymentStatus,
+              amount: centsToDecimal(totalCents),
+              referenceNumber:
+                data.paymentMethod === 'QR' ? data.referenceNumber?.trim() || null : null,
+              proofImagePath: paymentProofPath,
+              updatedAt: new Date(),
+            })
+            .returning();
+          await transaction.insert(paymentStatusHistories).values({
+            paymentId: payment.id,
+            newStatus: paymentStatus,
+            actorType: data.paymentMethod === 'QR' ? 'CUSTOMER' : 'SYSTEM',
+            note:
+              data.paymentMethod === 'QR'
+                ? 'Customer submitted payment proof at checkout.'
+                : 'Cash payment is due at delivery or pickup.',
+          });
+          await transaction.insert(orderStatusHistories).values({
+            orderId: order.id,
+            newStatus: 'PENDING',
           });
 
-          const storeSettings = await transaction.storeSetting.findMany({
-            where: { key: { in: ['qr_payment_image', 'qr_payment_instructions'] } },
-          });
-          const settings = new Map(storeSettings.map((setting) => [setting.key, setting.value]));
+          const storeSettingsRows = await transaction
+            .select()
+            .from(storeSettings)
+            .where(inArray(storeSettings.key, ['qr_payment_image', 'qr_payment_instructions']));
+          const settings = new Map(
+            storeSettingsRows.map((setting) => [setting.key, setting.value]),
+          );
           const qrPaymentImage = settings.get('qr_payment_image');
           const qrPaymentInstructions = settings.get('qr_payment_instructions');
 
           return {
-            order,
+            order: { ...order, items: insertedItems },
             trackingToken,
             qrPaymentImage: typeof qrPaymentImage === 'string' ? qrPaymentImage : null,
             qrPaymentInstructions:
               typeof qrPaymentInstructions === 'string' ? qrPaymentInstructions : '',
           };
         },
-        { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
+        { isolationLevel: 'serializable' },
       );
 
       if (!created) {
-        await imageStorage.removePaymentProof(paymentProofPath);
+        if (paymentProofPath) await imageStorage.removePaymentProof(paymentProofPath);
         paymentProofPath = null;
         return unavailableReply(reply);
       }
@@ -560,12 +612,12 @@ export const orderRoutes: FastifyPluginAsync = async (app) => {
         items: created.order.items.map((item) => ({
           productName: item.productName,
           quantity: item.quantity,
-          unitPrice: item.unitPrice.toFixed(2),
-          lineTotal: item.lineTotal.toFixed(2),
+          unitPrice: item.unitPrice,
+          lineTotal: item.lineTotal,
         })),
-        subtotal: created.order.subtotal.toFixed(2),
-        deliveryFee: created.order.deliveryFee.toFixed(2),
-        total: created.order.total.toFixed(2),
+        subtotal: created.order.subtotal,
+        deliveryFee: created.order.deliveryFee,
+        total: created.order.total,
         qrPaymentImage: created.qrPaymentImage,
         qrPaymentInstructions: created.qrPaymentInstructions,
       });
@@ -583,16 +635,17 @@ export const orderRoutes: FastifyPluginAsync = async (app) => {
       if (error instanceof OrderAmountError) {
         return reply.code(400).send({ error: error.message });
       }
-      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
-        const duplicateOrder = await prisma.order.findUnique({
-          where: { idempotencyKeyHash },
-          select: { orderNumber: true },
-        });
+      if (isUniqueViolation(error)) {
+        const [duplicateOrder] = await app.db
+          .select({ orderNumber: orders.orderNumber })
+          .from(orders)
+          .where(eq(orders.idempotencyKeyHash, idempotencyKeyHash))
+          .limit(1);
         if (duplicateOrder) {
           return reply.send({ duplicate: true, orderNumber: duplicateOrder.orderNumber });
         }
       }
-      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2034') {
+      if (isSerializationFailure(error)) {
         return reply
           .code(409)
           .send({ error: 'The menu changed during checkout. Please try again.' });
