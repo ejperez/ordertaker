@@ -39,7 +39,7 @@ The application uses Supabase-hosted PostgreSQL through Drizzle ORM. Product
 and QR images use the public Storage bucket; payment proofs use the private bucket.
 Never commit `.env` or expose the service-role key to Vite or browser code.
 
-The storefront runs at <http://localhost:5173>; the public menu is at `/` and
+The local Vite storefront runs at <http://localhost:5173>; the public menu is at `/` and
 the guest cart and checkout are at `/checkout`. The owner dashboard is at
 `/admin`. The API health check is available at
 <http://localhost:3000/api/health>. The owner dashboard supports category and
@@ -104,7 +104,7 @@ aware that seeding updates the owner password and starter products.
 
 1. Create a Supabase project and create public `product-images` and private
    `payment-proofs` Storage buckets.
-2. Copy the project URL and service-role key into the Render backend
+2. Copy the project URL and service-role key into the Render Web Service
    environment. Never add the service-role key to frontend variables.
 3. Set `DATABASE_URL` to Supabase's transaction-pooler URI, normally port 6543.
    Set `DIRECT_URL` to the direct PostgreSQL URI for Drizzle migrations. If the
@@ -116,36 +116,35 @@ aware that seeding updates the owner password and starter products.
 ### Render deployment
 
 1. Create a Render Blueprint from this repository and apply `render.yaml`.
-   Render builds the Fastify API as a Web Service and React/Vite as a Static
-   Site. The API build compiles TypeScript and committed Drizzle schema files.
+   Render builds the React/Vite frontend and Fastify API into one Web Service.
+   Fastify serves `frontend/dist` in production.
 2. Set `DATABASE_URL`, `DIRECT_URL`, `SUPABASE_URL`,
-   `SUPABASE_SERVICE_ROLE_KEY`, and `FRONTEND_ORIGIN` on the backend service.
-   Set `VITE_API_URL` on the static site to the API's HTTPS URL.
-3. Set `FRONTEND_ORIGIN` to the static site's exact HTTPS origin. Save and
-   redeploy both services after setting their URLs.
+   `SUPABASE_SERVICE_ROLE_KEY`, and `FRONTEND_ORIGIN` on that service. Set
+   `FRONTEND_ORIGIN` to the service's exact HTTPS origin or its custom domain.
+   Do not set `VITE_API_URL` in production; the frontend calls the same origin.
+3. Save the environment values and redeploy the service.
 4. Render runs `db:deploy` before starting the API. On a new database, this
    applies committed Drizzle SQL. On an existing complete database, the deploy
    script records a baseline instead of replaying initial table creation. It
    refuses partial schemas for manual review. Historical SQL migrations remain
    archived under `backend/drizzle/legacy-sql/` and are not replayed. Run
-   `npm run db:seed -w @ordertaker/backend` once from the backend service shell
+   `npm run db:seed -w @ordertaker/backend` once from the Web Service shell
    for a new database, after setting `OWNER_NAME`, `OWNER_EMAIL`, and a unique
    `OWNER_PASSWORD` of at least 12 characters. Do not run seed as routine
    deployment; it updates owner and starter-product data.
 5. Confirm `/api/health`, guest checkout, owner login, payment-proof review,
    and WebSocket upgrades at `/api/admin/socket.io`.
 
-Render terminates HTTPS and supports WebSocket upgrades on the same API
-service. Keep one backend instance because Socket.IO rooms use in-process
-state. CORS and Socket.IO accept only `FRONTEND_ORIGIN`; production admin
-cookies use `Secure`.
+Render terminates HTTPS and supports WebSocket upgrades on the same service.
+Keep one instance because Socket.IO rooms use in-process state. CORS and
+Socket.IO accept only `FRONTEND_ORIGIN`; production admin cookies use
+`Secure` and stay first-party because frontend and API share one origin.
 
-The Render Blueprint uses `npm ci --include=dev` and
-`npm run build -w @ordertaker/backend` for the API.
-It starts the API with `npm run db:deploy -w @ordertaker/backend` followed by
-`npm run start -w @ordertaker/backend`. The frontend runs
-`npm run build -w @ordertaker/frontend` and publishes `frontend/dist`; its
-rewrite route supports React Router paths.
+The Render Blueprint uses `npm ci --include=dev` and `npm run build` at the
+repository root. This builds both workspaces. It starts the service with
+`npm run db:deploy -w @ordertaker/backend` followed by
+`npm run start -w @ordertaker/backend`. Fastify serves static files and
+supports React Router paths from the built frontend.
 
 Before moving an existing local installation, back up PostgreSQL and local
 uploads. Restore the database into Supabase, upload product and QR images to

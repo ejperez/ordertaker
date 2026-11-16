@@ -72,8 +72,10 @@ Use a TypeScript-first stack.
 
 ### Hosting and production configuration
 
--   Render Web Service for the Fastify and Socket.IO API.
--   Render Static Site for the React/Vite frontend.
+-   One Render Web Service for Fastify, Socket.IO, and the built React/Vite
+    frontend.
+-   Fastify serves `frontend/dist` in production; local development keeps Vite
+    on its own development server.
 -   Supabase transaction-pooler URL for Render runtime connections.
 -   Use `prepare: false` with postgres.js over the transaction pooler.
 -   Use a direct PostgreSQL URL for Drizzle Kit migrations when supported;
@@ -679,7 +681,8 @@ production build step.
 The database plugin creates the runtime client with
 `drizzle(postgres(DATABASE_URL, { prepare: false, max: 5 }), { schema })` and
 closes the postgres.js pool when Fastify shuts down. Drizzle Kit reads
-`DIRECT_URL` for migration operations. The frontend receives only `VITE_API_URL`.
+`DIRECT_URL` for migration operations. Production frontend requests use the
+same origin as Fastify; local Vite development uses `VITE_API_URL`.
 
 ### ORM migration status
 
@@ -921,8 +924,8 @@ Implementation requirements:
 -   Store object keys or public image URLs in PostgreSQL, not image bytes.
 -   Keep payment proofs in the private bucket; never expose public URLs or
     anonymous access to proof objects.
--   Use the backend service-role credential only on the API. Apply authorization
-    before each proof read.
+-   Use the backend service-role credential only on the Web Service. Apply
+    authorization before each proof read.
 -   Clean up replaced objects safely and back up Supabase Storage separately
     from database backups.
 -   Before migrating an existing installation, transfer local objects and
@@ -1177,8 +1180,7 @@ disconnect.
 -   [x] Test upload validation and private payment-proof access.
 -   [x] Test admin route and socket authorization.
 -   [ ] Test mobile layouts and common error/empty/loading states.
--   [ ] Deploy the API as a Render Web Service and frontend as a Render
-    Static Site.
+-   [ ] Deploy the API and frontend together as one Render Web Service.
 -   [ ] Configure Render environment variables, Supabase URLs/buckets, HTTPS,
     exact CORS origin, and production seed credentials.
 -   [ ] Verify WebSocket upgrades and authenticated private proof access.
@@ -1199,14 +1201,15 @@ Deployment, HTTPS provisioning, backup scheduling, and the manual
 mobile/browser acceptance pass remain pending until configured and verified
 in the hosting accounts.
 
-For Render, build the API with `npm ci --include=dev && npm run build -w
-@ordertaker/backend`. Start it with `npm run db:deploy -w @ordertaker/backend
-&& npm run start -w @ordertaker/backend`. Build the static site with `npm ci
---include=dev && npm run build -w @ordertaker/frontend`, and publish
-`frontend/dist`. Configure `DATABASE_URL`, `DIRECT_URL`, `SUPABASE_URL`,
+For Render, build both workspaces at the repository root with
+`npm ci --include=dev && npm run build`. Start the service with
+`npm run db:deploy -w @ordertaker/backend && npm run start -w @ordertaker/backend`.
+Fastify serves the built `frontend/dist` and falls back to `index.html` for
+React Router paths. Configure `DATABASE_URL`, `DIRECT_URL`, `SUPABASE_URL`,
 `SUPABASE_SERVICE_ROLE_KEY`, bucket names, `FRONTEND_ORIGIN`, and owner seed
-values only on the backend. Set only `VITE_API_URL` on the static site. Never
-pass database or service-role credentials to Vite.
+values only on the Web Service. Set `FRONTEND_ORIGIN` to that service's exact
+HTTPS origin. Production does not need `VITE_API_URL`; never pass database or
+service-role credentials to Vite.
 
 ------------------------------------------------------------------------
 

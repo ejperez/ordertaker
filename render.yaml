@@ -2,8 +2,7 @@ services:
   - type: web
     name: ordertaker-api
     runtime: node
-    rootDir: backend
-    buildCommand: npm ci --include=dev && npm run build -w @ordertaker/backend
+    buildCommand: npm ci --include=dev && npm run build
     startCommand: npm run db:deploy -w @ordertaker/backend && npm run start -w @ordertaker/backend
     healthCheckPath: /api/health
     envVars:
@@ -31,16 +30,3 @@ services:
         sync: false
       - key: OWNER_PASSWORD
         sync: false
-  - type: web
-    name: ordertaker-store
-    runtime: static
-    rootDir: frontend
-    buildCommand: npm ci --include=dev && npm run build -w @ordertaker/frontend
-    staticPublishPath: ./frontend/dist
-    envVars:
-      - key: VITE_API_URL
-        sync: false
-    routes:
-      - type: rewrite
-        source: /*
-        destination: /index.html

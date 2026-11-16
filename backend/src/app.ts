@@ -9,6 +9,7 @@ import { env } from './config/env.js';
 import { healthRoutes } from './routes/health.js';
 import { attachRealtimeServer, closeRealtimeServer } from './realtime.js';
 import { databasePlugin } from './plugins/database.js';
+import { frontendPlugin } from './plugins/frontend.js';
 
 export async function buildApp() {
   const app = Fastify({ logger: true });
@@ -29,6 +30,9 @@ export async function buildApp() {
   await app.register(adminOrderRoutes, { prefix: '/api/admin' });
   await app.register(catalogRoutes, { prefix: '/api' });
   await app.register(orderRoutes, { prefix: '/api' });
+  if (process.env.NODE_ENV === 'production') {
+    await app.register(frontendPlugin);
+  }
   attachRealtimeServer(app.server, app.db);
 
   app.setErrorHandler((error, request, reply) => {

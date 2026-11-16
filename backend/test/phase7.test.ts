@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
 import { createHash, randomBytes } from 'node:crypto';
-import { readFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { test, type TestContext } from 'node:test';
 import Fastify, { type FastifyInstance, type FastifyPluginAsync } from 'fastify';
 import { PGlite } from '@electric-sql/pglite';
@@ -24,6 +26,7 @@ import { adminOrderRoutes } from '../src/routes/admin-orders.js';
 import { orderRoutes } from '../src/routes/orders.js';
 import { ImageValidationError, imageStorage } from '../src/services/image-storage.js';
 import { attachRealtimeServer, closeRealtimeServer } from '../src/realtime.js';
+import { frontendPlugin } from '../src/plugins/frontend.js';
 
 type TestDatabase = {
   client: PGlite;
@@ -584,4 +587,35 @@ test('Supabase Storage keeps proof objects private and product images public', a
   assert.equal(requests[1].url.includes('/public/'), false);
   assert.equal(requests[1].url.includes('payment-proofs'), true);
   assert.equal(requests[1].init?.headers instanceof Object, true);
+});
+
+test('production frontend serves assets and SPA routes without masking API 404s', async (context) => {
+  const root = await mkdtemp(join(tmpdir(), 'ordertaker-frontend-'));
+  context.after(async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+  await mkdir(join(root, 'assets'));
+  await writeFile(join(root, 'index.html'), '<main>storefront</main>');
+  await writeFile(join(root, 'assets', 'app.js'), 'console.log("storefront")');
+
+  const app = Fastify({ logger: false });
+  await app.register(frontendPlugin, { root });
+  await app.ready();
+  context.after(() => app.close());
+
+  const asset = await app.inject('/assets/app.js');
+  assert.equal(asset.statusCode, 200);
+  assert.match(asset.headers['content-type'] ?? '', /javascript/);
+
+  const route = await app.inject('/admin');
+  assert.equal(route.statusCode, 200);
+  assert.match(route.headers['content-type'] ?? '', /text\/html/);
+
+  const missingAsset = await app.inject('/assets/missing.js');
+  assert.equal(missingAsset.statusCode, 404);
+  assert.deepEqual(missingAsset.json(), { error: 'Not Found' });
+
+  const missingApiRoute = await app.inject('/api/missing');
+  assert.equal(missingApiRoute.statusCode, 404);
+  assert.deepEqual(missingApiRoute.json(), { error: 'Not Found' });
 });

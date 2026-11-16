@@ -1,4 +1,6 @@
-const apiUrl = import.meta.env.VITE_API_URL ?? 'http://localhost:3000';
+const apiUrl =
+  import.meta.env.VITE_API_URL ??
+  (import.meta.env.PROD ? window.location.origin : 'http://localhost:3000');
 
 export async function apiRequest<T>(path: string, init: RequestInit = {}): Promise<T> {
   const headers = new Headers(init.headers);
