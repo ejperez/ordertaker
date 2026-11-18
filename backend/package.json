@@ -5,7 +5,7 @@
   "scripts": {
     "dev": "tsx watch src/server.ts",
     "build": "tsc -p tsconfig.json",
-    "start": "node --env-file=.env.production dist/src/server.js",
+    "start": "node dist/src/server.js",
     "test": "npm run test:types && node --import tsx --import ./test/test-env.ts --test --test-concurrency=1 ./test/phase7.test.ts",
     "test:types": "tsc -p test/tsconfig.json",
     "db:generate": "drizzle-kit generate",
