@@ -1,4 +1,10 @@
-# Implementation Plan --- Ordertaker POC
+# Implementation Plan --- Ordertaker POC (Historical)
+
+> Current setup and deployment steps live in [README.md](./README.md). The app
+> now uses local MySQL through Drizzle ORM and local files on a persistent
+> server or VM. Supabase, PostgreSQL, and Render guidance below describes the
+> previous deployment only. Existing Supabase data and files remain untouched;
+> transfer and verify them before production cutover.
 
 ## 1. Project Overview
 

@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { asc, desc, eq } from 'drizzle-orm';
 import { z } from 'zod';
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
@@ -88,10 +89,14 @@ export const adminCatalogRoutes: FastifyPluginAsync = async (app) => {
     if (!data.slug)
       return reply.code(400).send({ error: 'Category name must contain letters or numbers' });
     try {
+      const id = randomUUID();
+      await app.db.insert(categories).values({ id, ...data, updatedAt: new Date() });
       const [category] = await app.db
-        .insert(categories)
-        .values({ ...data, updatedAt: new Date() })
-        .returning();
+        .select()
+        .from(categories)
+        .where(eq(categories.id, id))
+        .limit(1);
+      if (!category) throw new Error('Inserted category could not be read');
       return reply.code(201).send(category);
     } catch (error) {
       return handleUniqueError(error, reply);
@@ -105,11 +110,15 @@ export const adminCatalogRoutes: FastifyPluginAsync = async (app) => {
     if (!data.slug)
       return reply.code(400).send({ error: 'Category name must contain letters or numbers' });
     try {
-      const [category] = await app.db
+      await app.db
         .update(categories)
         .set({ ...data, updatedAt: new Date() })
+        .where(eq(categories.id, request.params.id));
+      const [category] = await app.db
+        .select()
+        .from(categories)
         .where(eq(categories.id, request.params.id))
-        .returning();
+        .limit(1);
       if (!category) return reply.code(404).send({ error: 'Category not found' });
       return category;
     } catch (error) {
@@ -120,11 +129,15 @@ export const adminCatalogRoutes: FastifyPluginAsync = async (app) => {
   app.patch<{ Params: { id: string } }>('/categories/:id/availability', async (request, reply) => {
     const parsed = categoryAvailabilitySchema.safeParse(request.body);
     if (!parsed.success) return sendValidationError(reply, parsed.error);
-    const [category] = await app.db
+    await app.db
       .update(categories)
       .set({ ...parsed.data, updatedAt: new Date() })
+      .where(eq(categories.id, request.params.id));
+    const [category] = await app.db
+      .select()
+      .from(categories)
       .where(eq(categories.id, request.params.id))
-      .returning();
+      .limit(1);
     if (!category) return reply.code(404).send({ error: 'Category not found' });
     return category;
   });
@@ -148,23 +161,40 @@ export const adminCatalogRoutes: FastifyPluginAsync = async (app) => {
     return reply.code(204).send();
   });
 
-  app.get<{ Querystring: { includeArchived?: string } }>('/products', async (request) =>
-    app.db.query.products.findMany({
-      where: request.query.includeArchived === 'true' ? undefined : eq(products.isArchived, false),
-      with: {
-        category: { columns: { id: true, name: true, slug: true, isActive: true } },
+  app.get<{ Querystring: { includeArchived?: string } }>('/products', async (request) => {
+    const rows = await app.db
+      .select()
+      .from(products)
+      .innerJoin(categories, eq(products.categoryId, categories.id))
+      .where(request.query.includeArchived === 'true' ? undefined : eq(products.isArchived, false))
+      .orderBy(desc(products.updatedAt));
+    return rows.map(({ products: product, categories: category }) => ({
+      ...product,
+      category: {
+        id: category.id,
+        name: category.name,
+        slug: category.slug,
+        isActive: category.isActive,
       },
-      orderBy: [desc(products.updatedAt)],
-    }),
-  );
+    }));
+  });
 
   app.get<{ Params: { id: string } }>('/products/:id', async (request, reply) => {
-    const product = await app.db.query.products.findFirst({
-      where: eq(products.id, request.params.id),
-      with: { category: { columns: { id: true, name: true, slug: true } } },
-    });
-    if (!product) return reply.code(404).send({ error: 'Product not found' });
-    return product;
+    const [row] = await app.db
+      .select()
+      .from(products)
+      .innerJoin(categories, eq(products.categoryId, categories.id))
+      .where(eq(products.id, request.params.id))
+      .limit(1);
+    if (!row) return reply.code(404).send({ error: 'Product not found' });
+    return {
+      ...row.products,
+      category: {
+        id: row.categories.id,
+        name: row.categories.name,
+        slug: row.categories.slug,
+      },
+    };
   });
 
   app.post('/products', async (request, reply) => {
@@ -180,10 +210,12 @@ export const adminCatalogRoutes: FastifyPluginAsync = async (app) => {
     if (!data.slug)
       return reply.code(400).send({ error: 'Product name must contain letters or numbers' });
     try {
-      const [product] = await app.db
+      const id = randomUUID();
+      await app.db
         .insert(products)
-        .values({ ...data, price: parsed.data.price.toFixed(2), updatedAt: new Date() })
-        .returning();
+        .values({ id, ...data, price: parsed.data.price.toFixed(2), updatedAt: new Date() });
+      const [product] = await app.db.select().from(products).where(eq(products.id, id)).limit(1);
+      if (!product) throw new Error('Inserted product could not be read');
       return reply.code(201).send(product);
     } catch (error) {
       return handleUniqueError(error, reply);
@@ -203,11 +235,15 @@ export const adminCatalogRoutes: FastifyPluginAsync = async (app) => {
     if (!data.slug)
       return reply.code(400).send({ error: 'Product name must contain letters or numbers' });
     try {
-      const [product] = await app.db
+      await app.db
         .update(products)
         .set({ ...data, price: parsed.data.price.toFixed(2), updatedAt: new Date() })
+        .where(eq(products.id, request.params.id));
+      const [product] = await app.db
+        .select()
+        .from(products)
         .where(eq(products.id, request.params.id))
-        .returning();
+        .limit(1);
       if (!product) return reply.code(404).send({ error: 'Product not found' });
       return product;
     } catch (error) {
@@ -218,11 +254,15 @@ export const adminCatalogRoutes: FastifyPluginAsync = async (app) => {
   app.patch<{ Params: { id: string } }>('/products/:id/availability', async (request, reply) => {
     const parsed = availabilitySchema.safeParse(request.body);
     if (!parsed.success) return sendValidationError(reply, parsed.error);
-    const [product] = await app.db
+    await app.db
       .update(products)
       .set({ ...parsed.data, updatedAt: new Date() })
+      .where(eq(products.id, request.params.id));
+    const [product] = await app.db
+      .select()
+      .from(products)
       .where(eq(products.id, request.params.id))
-      .returning();
+      .limit(1);
     if (!product) return reply.code(404).send({ error: 'Product not found' });
     return product;
   });
@@ -230,21 +270,29 @@ export const adminCatalogRoutes: FastifyPluginAsync = async (app) => {
   app.patch<{ Params: { id: string } }>('/products/:id/archive', async (request, reply) => {
     const parsed = archiveSchema.safeParse(request.body);
     if (!parsed.success) return sendValidationError(reply, parsed.error);
-    const [product] = await app.db
+    await app.db
       .update(products)
       .set({ ...parsed.data, updatedAt: new Date() })
+      .where(eq(products.id, request.params.id));
+    const [product] = await app.db
+      .select()
+      .from(products)
       .where(eq(products.id, request.params.id))
-      .returning();
+      .limit(1);
     if (!product) return reply.code(404).send({ error: 'Product not found' });
     return product;
   });
 
   app.delete<{ Params: { id: string } }>('/products/:id', async (request, reply) => {
-    const [product] = await app.db
+    await app.db
       .update(products)
       .set({ isArchived: true, isAvailable: false, updatedAt: new Date() })
+      .where(eq(products.id, request.params.id));
+    const [product] = await app.db
+      .select()
+      .from(products)
       .where(eq(products.id, request.params.id))
-      .returning();
+      .limit(1);
     if (!product) return reply.code(404).send({ error: 'Product not found' });
     return product;
   });
@@ -264,11 +312,15 @@ export const adminCatalogRoutes: FastifyPluginAsync = async (app) => {
 
       const imagePath = await imageStorage.saveProductImage(parsed.data.data);
       try {
-        const [product] = await app.db
+        await app.db
           .update(products)
           .set({ imagePath, updatedAt: new Date() })
+          .where(eq(products.id, oldProduct.id));
+        const [product] = await app.db
+          .select()
+          .from(products)
           .where(eq(products.id, oldProduct.id))
-          .returning();
+          .limit(1);
         if (!product) {
           await imageStorage.removeProductImage(imagePath);
           return reply.code(404).send({ error: 'Product not found' });

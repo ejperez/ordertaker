@@ -1,5 +1,5 @@
 import type { FastifyPluginAsync } from 'fastify';
-import postgres from 'postgres';
+import mysql from 'mysql2/promise';
 import { env } from '../config/env.js';
 import { createDatabase } from '../db.js';
 
@@ -10,7 +10,7 @@ declare module 'fastify' {
 }
 
 export const databasePlugin: FastifyPluginAsync = async (app) => {
-  const client = postgres(env.DATABASE_URL, { prepare: false, max: 5 });
+  const client = mysql.createPool(env.DATABASE_URL);
   app.decorate('db', createDatabase(client));
   app.addHook('onClose', async () => {
     await client.end();

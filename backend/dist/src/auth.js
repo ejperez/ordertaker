@@ -1,6 +1,6 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { and, eq, gt } from 'drizzle-orm';
-import { adminSessions } from './db/schema/auth.js';
+import { adminSessions, users } from './db/schema/auth.js';
 import { env } from './config/env.js';
 export const sessionCookieName = 'ordertaker_admin';
 export const sessionDurationMs = 12 * 60 * 60 * 1000;
@@ -47,16 +47,18 @@ export async function requireOwner(request, reply) {
         await reply.code(401).send({ error: 'Authentication required' });
         return;
     }
-    const session = await request.server.db.query.adminSessions.findFirst({
-        where: and(eq(adminSessions.tokenHash, hashSessionToken(token)), gt(adminSessions.expiresAt, new Date())),
-        with: { user: { columns: { id: true, name: true, email: true } } },
-    });
-    if (!session) {
+    const [owner] = await request.server.db
+        .select({ id: users.id, name: users.name, email: users.email })
+        .from(adminSessions)
+        .innerJoin(users, eq(adminSessions.userId, users.id))
+        .where(and(eq(adminSessions.tokenHash, hashSessionToken(token)), gt(adminSessions.expiresAt, new Date())))
+        .limit(1);
+    if (!owner) {
         clearSessionCookie(reply);
         await reply.code(401).send({ error: 'Authentication required' });
         return;
     }
-    request.owner = session.user;
+    request.owner = owner;
 }
 export function createSessionToken() {
     return randomBytes(32).toString('base64url');

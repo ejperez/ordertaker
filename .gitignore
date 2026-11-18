@@ -6,4 +6,5 @@ coverage/
 *.log
 backend/public/uploads/*
 !backend/public/uploads/.gitkeep
+backend/uploads/
 backend/prisma/generated/

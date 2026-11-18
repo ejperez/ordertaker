@@ -1,7 +1,9 @@
-import { and, asc, desc, eq, exists, gte, lte } from 'drizzle-orm';
+import { randomUUID } from 'node:crypto';
+import { and, asc, desc, eq, exists, gte, inArray, lte } from 'drizzle-orm';
 import { z } from 'zod';
 import type { FastifyPluginAsync } from 'fastify';
 import { hasValidOrigin, requireOwner } from '../auth.js';
+import type { AppDatabase } from '../db.js';
 import { isSerializationFailure } from '../db/errors.js';
 import {
   messages,
@@ -11,13 +13,14 @@ import {
   paymentStatusHistories,
   payments,
   storeSettings,
+  users,
 } from '../db/schema/index.js';
-import { orderStatus, paymentStatus } from '../db/schema/enums.js';
+import { orderStatusValues, paymentStatusValues } from '../db/schema/enums.js';
 import { ImageValidationError, imageStorage } from '../services/image-storage.js';
 import { publishNewMessage, publishOrderUpdated } from '../realtime.js';
 
-const orderStatuses = orderStatus.enumValues;
-const paymentStatuses = paymentStatus.enumValues;
+const orderStatuses = orderStatusValues;
+const paymentStatuses = paymentStatusValues;
 const filtersSchema = z.object({
   status: z.enum(orderStatuses).optional(),
   fulfillmentType: z.enum(['DELIVERY', 'PICKUP']).optional(),
@@ -64,30 +67,167 @@ const validTransitions: Record<(typeof orderStatuses)[number], (typeof orderStat
   CANCELLED: [],
 };
 
-const orderWithDetails = {
-  items: { orderBy: [asc(orderItems.createdAt)] },
-  payment: {
-    columns: {
-      method: true,
-      status: true,
-      amount: true,
-      referenceNumber: true,
-      rejectionReason: true,
-      verifiedAt: true,
-    },
-    with: {
-      verifiedBy: { columns: { name: true } },
-      statusHistory: {
-        orderBy: [asc(paymentStatusHistories.createdAt)],
-        with: { changedBy: { columns: { name: true } } },
-      },
-    },
-  },
-  statusHistory: {
-    orderBy: [asc(orderStatusHistories.createdAt)],
-    with: { changedBy: { columns: { name: true } } },
-  },
-};
+async function loadOrdersWithDetails(db: AppDatabase, orderRows: (typeof orders.$inferSelect)[]) {
+  if (!orderRows.length) return [];
+
+  const orderIds = orderRows.map((order) => order.id);
+  const [itemRows, paymentRows, historyRows] = await Promise.all([
+    db
+      .select()
+      .from(orderItems)
+      .where(inArray(orderItems.orderId, orderIds))
+      .orderBy(asc(orderItems.createdAt)),
+    db
+      .select({
+        id: payments.id,
+        orderId: payments.orderId,
+        method: payments.method,
+        status: payments.status,
+        amount: payments.amount,
+        referenceNumber: payments.referenceNumber,
+        rejectionReason: payments.rejectionReason,
+        verifiedAt: payments.verifiedAt,
+        verifiedByName: users.name,
+      })
+      .from(payments)
+      .leftJoin(users, eq(payments.verifiedById, users.id))
+      .where(inArray(payments.orderId, orderIds)),
+    db
+      .select({
+        id: orderStatusHistories.id,
+        orderId: orderStatusHistories.orderId,
+        oldStatus: orderStatusHistories.oldStatus,
+        newStatus: orderStatusHistories.newStatus,
+        changedByUserId: orderStatusHistories.changedByUserId,
+        note: orderStatusHistories.note,
+        createdAt: orderStatusHistories.createdAt,
+        changedByName: users.name,
+      })
+      .from(orderStatusHistories)
+      .leftJoin(users, eq(orderStatusHistories.changedByUserId, users.id))
+      .where(inArray(orderStatusHistories.orderId, orderIds))
+      .orderBy(asc(orderStatusHistories.createdAt)),
+  ]);
+  const paymentIds = paymentRows.map((payment) => payment.id);
+  const paymentHistoryRows = paymentIds.length
+    ? await db
+        .select({
+          id: paymentStatusHistories.id,
+          paymentId: paymentStatusHistories.paymentId,
+          oldStatus: paymentStatusHistories.oldStatus,
+          newStatus: paymentStatusHistories.newStatus,
+          actorType: paymentStatusHistories.actorType,
+          changedByUserId: paymentStatusHistories.changedByUserId,
+          note: paymentStatusHistories.note,
+          createdAt: paymentStatusHistories.createdAt,
+          changedByName: users.name,
+        })
+        .from(paymentStatusHistories)
+        .leftJoin(users, eq(paymentStatusHistories.changedByUserId, users.id))
+        .where(inArray(paymentStatusHistories.paymentId, paymentIds))
+        .orderBy(asc(paymentStatusHistories.createdAt))
+    : [];
+
+  const itemsByOrderId = new Map<string, (typeof itemRows)[number][]>();
+  for (const item of itemRows) {
+    const items = itemsByOrderId.get(item.orderId) ?? [];
+    items.push(item);
+    itemsByOrderId.set(item.orderId, items);
+  }
+  const paymentByOrderId = new Map(paymentRows.map((payment) => [payment.orderId, payment]));
+  const paymentHistoryById = new Map<string, (typeof paymentHistoryRows)[number][]>();
+  for (const history of paymentHistoryRows) {
+    const histories = paymentHistoryById.get(history.paymentId) ?? [];
+    histories.push(history);
+    paymentHistoryById.set(history.paymentId, histories);
+  }
+  const orderHistoryById = new Map<string, (typeof historyRows)[number][]>();
+  for (const history of historyRows) {
+    const histories = orderHistoryById.get(history.orderId) ?? [];
+    histories.push(history);
+    orderHistoryById.set(history.orderId, histories);
+  }
+
+  return orderRows.map((order) => {
+    const payment = paymentByOrderId.get(order.id);
+    return {
+      ...order,
+      items: itemsByOrderId.get(order.id) ?? [],
+      payment: payment
+        ? {
+            method: payment.method,
+            status: payment.status,
+            amount: payment.amount,
+            referenceNumber: payment.referenceNumber,
+            rejectionReason: payment.rejectionReason,
+            verifiedAt: payment.verifiedAt,
+            verifiedBy: payment.verifiedByName === null ? null : { name: payment.verifiedByName },
+            statusHistory: (paymentHistoryById.get(payment.id) ?? []).map(
+              ({ changedByName, ...history }) => ({
+                ...history,
+                changedBy: changedByName === null ? null : { name: changedByName },
+              }),
+            ),
+          }
+        : null,
+      statusHistory: (orderHistoryById.get(order.id) ?? []).map(
+        ({ changedByName, ...history }) => ({
+          ...history,
+          changedBy: changedByName === null ? null : { name: changedByName },
+        }),
+      ),
+    };
+  });
+}
+
+async function loadPaymentDetails(db: AppDatabase, paymentId: string) {
+  const [payment] = await db
+    .select({
+      method: payments.method,
+      status: payments.status,
+      amount: payments.amount,
+      referenceNumber: payments.referenceNumber,
+      rejectionReason: payments.rejectionReason,
+      verifiedAt: payments.verifiedAt,
+      verifiedByName: users.name,
+    })
+    .from(payments)
+    .leftJoin(users, eq(payments.verifiedById, users.id))
+    .where(eq(payments.id, paymentId))
+    .limit(1);
+  if (!payment) return null;
+
+  const historyRows = await db
+    .select({
+      id: paymentStatusHistories.id,
+      paymentId: paymentStatusHistories.paymentId,
+      oldStatus: paymentStatusHistories.oldStatus,
+      newStatus: paymentStatusHistories.newStatus,
+      actorType: paymentStatusHistories.actorType,
+      changedByUserId: paymentStatusHistories.changedByUserId,
+      note: paymentStatusHistories.note,
+      createdAt: paymentStatusHistories.createdAt,
+      changedByName: users.name,
+    })
+    .from(paymentStatusHistories)
+    .leftJoin(users, eq(paymentStatusHistories.changedByUserId, users.id))
+    .where(eq(paymentStatusHistories.paymentId, paymentId))
+    .orderBy(asc(paymentStatusHistories.createdAt));
+
+  return {
+    method: payment.method,
+    status: payment.status,
+    amount: payment.amount,
+    referenceNumber: payment.referenceNumber,
+    rejectionReason: payment.rejectionReason,
+    verifiedAt: payment.verifiedAt,
+    verifiedBy: payment.verifiedByName === null ? null : { name: payment.verifiedByName },
+    statusHistory: historyRows.map(({ changedByName, ...history }) => ({
+      ...history,
+      changedBy: changedByName === null ? null : { name: changedByName },
+    })),
+  };
+}
 
 export const adminOrderRoutes: FastifyPluginAsync = async (app) => {
   app.addHook('preHandler', requireOwner);
@@ -123,19 +263,22 @@ export const adminOrderRoutes: FastifyPluginAsync = async (app) => {
       );
     }
 
-    return app.db.query.orders.findMany({
-      where: conditions.length ? and(...conditions) : undefined,
-      with: orderWithDetails,
-      orderBy: [desc(orders.createdAt)],
-      limit: 200,
-    });
+    const orderRows = await app.db
+      .select()
+      .from(orders)
+      .where(conditions.length ? and(...conditions) : undefined)
+      .orderBy(desc(orders.createdAt))
+      .limit(200);
+    return loadOrdersWithDetails(app.db, orderRows);
   });
 
   app.get<{ Params: { id: string } }>('/orders/:id', async (request, reply) => {
-    const order = await app.db.query.orders.findFirst({
-      where: eq(orders.id, request.params.id),
-      with: orderWithDetails,
-    });
+    const [orderRow] = await app.db
+      .select()
+      .from(orders)
+      .where(eq(orders.id, request.params.id))
+      .limit(1);
+    const [order] = await loadOrdersWithDetails(app.db, orderRow ? [orderRow] : []);
     if (!order) return reply.code(404).send({ error: 'Order not found' });
     return order;
   });
@@ -167,15 +310,16 @@ export const adminOrderRoutes: FastifyPluginAsync = async (app) => {
       .limit(1);
     if (!order) return reply.code(404).send({ error: 'Order not found' });
 
-    const [message] = await app.db
-      .insert(messages)
-      .values({
-        orderId: order.id,
-        senderType: 'OWNER',
-        senderName: request.owner!.name,
-        message: parsed.data.message,
-      })
-      .returning();
+    const id = randomUUID();
+    await app.db.insert(messages).values({
+      id,
+      orderId: order.id,
+      senderType: 'OWNER',
+      senderName: request.owner!.name,
+      message: parsed.data.message,
+    });
+    const [message] = await app.db.select().from(messages).where(eq(messages.id, id)).limit(1);
+    if (!message) throw new Error('Inserted message could not be read');
     publishNewMessage(order.id, message);
     return reply.code(201).send(message);
   });
@@ -234,7 +378,7 @@ export const adminOrderRoutes: FastifyPluginAsync = async (app) => {
             return { kind: 'invalid' as const, method: payment.method, status: payment.status };
           }
 
-          const updated = await transaction
+          const [updated] = await transaction
             .update(payments)
             .set({
               status: parsed.data.status,
@@ -250,9 +394,8 @@ export const adminOrderRoutes: FastifyPluginAsync = async (app) => {
                 eq(payments.method, payment.method),
                 eq(payments.status, payment.status),
               ),
-            )
-            .returning({ id: payments.id });
-          if (updated.length !== 1) return { kind: 'conflict' as const };
+            );
+          if (updated.affectedRows !== 1) return { kind: 'conflict' as const };
 
           await transaction.insert(paymentStatusHistories).values({
             paymentId: payment.id,
@@ -268,25 +411,7 @@ export const adminOrderRoutes: FastifyPluginAsync = async (app) => {
                   : 'QR payment verified.',
           });
 
-          const updatedPayment = await transaction.query.payments.findFirst({
-            where: eq(payments.id, payment.id),
-            columns: {
-              method: true,
-              status: true,
-              amount: true,
-              referenceNumber: true,
-              rejectionReason: true,
-              verifiedAt: true,
-            },
-            with: {
-              verifiedBy: { columns: { name: true } },
-              statusHistory: {
-                orderBy: [asc(paymentStatusHistories.createdAt)],
-                with: { changedBy: { columns: { name: true } } },
-              },
-            },
-          });
-          return { kind: 'success' as const, payment: updatedPayment };
+          return { kind: 'success' as const, paymentId: payment.id };
         },
         { isolationLevel: 'serializable' },
       );
@@ -305,12 +430,12 @@ export const adminOrderRoutes: FastifyPluginAsync = async (app) => {
           .code(409)
           .send({ error: 'Payment status changed concurrently. Refresh and retry.' });
       }
-      if (result.payment) {
-        publishOrderUpdated(request.params.id, 'payment:updated', {
-          status: result.payment.status,
-        });
-      }
-      return result.payment;
+      const updatedPayment = await loadPaymentDetails(app.db, result.paymentId);
+      if (!updatedPayment) throw new Error('Updated payment could not be read');
+      publishOrderUpdated(request.params.id, 'payment:updated', {
+        status: updatedPayment.status,
+      });
+      return updatedPayment;
     } catch (error) {
       if (isSerializationFailure(error)) {
         return reply
@@ -332,16 +457,18 @@ export const adminOrderRoutes: FastifyPluginAsync = async (app) => {
     try {
       const updated = await app.db.transaction(
         async (transaction) => {
-          const current = await transaction.query.orders.findFirst({
-            where: eq(orders.id, request.params.id),
-            columns: {
-              id: true,
-              status: true,
-              fulfillmentType: true,
-              paymentMethod: true,
-            },
-            with: { payment: { columns: { status: true } } },
-          });
+          const [current] = await transaction
+            .select({
+              id: orders.id,
+              status: orders.status,
+              fulfillmentType: orders.fulfillmentType,
+              paymentMethod: orders.paymentMethod,
+              paymentStatus: payments.status,
+            })
+            .from(orders)
+            .leftJoin(payments, eq(payments.orderId, orders.id))
+            .where(eq(orders.id, request.params.id))
+            .limit(1);
           if (!current) return { kind: 'missing' as const };
           if (!validTransitions[current.status].includes(parsed.data.status)) {
             return { kind: 'invalid' as const, current: current.status };
@@ -355,17 +482,16 @@ export const adminOrderRoutes: FastifyPluginAsync = async (app) => {
           if (
             parsed.data.status === 'IN_KITCHEN' &&
             current.paymentMethod === 'QR' &&
-            current.payment?.status !== 'PAID'
+            current.paymentStatus !== 'PAID'
           ) {
             return { kind: 'unpaid-qr' as const };
           }
 
-          const update = await transaction
+          const [update] = await transaction
             .update(orders)
             .set({ status: parsed.data.status, updatedAt: new Date() })
-            .where(and(eq(orders.id, current.id), eq(orders.status, current.status)))
-            .returning({ id: orders.id });
-          if (update.length !== 1) return { kind: 'conflict' as const };
+            .where(and(eq(orders.id, current.id), eq(orders.status, current.status)));
+          if (update.affectedRows !== 1) return { kind: 'conflict' as const };
 
           await transaction.insert(orderStatusHistories).values({
             orderId: current.id,
@@ -374,11 +500,7 @@ export const adminOrderRoutes: FastifyPluginAsync = async (app) => {
             changedByUserId: request.owner!.id,
             note: parsed.data.note || null,
           });
-          const order = await transaction.query.orders.findFirst({
-            where: eq(orders.id, current.id),
-            with: orderWithDetails,
-          });
-          return { kind: 'success' as const, order };
+          return { kind: 'success' as const, orderId: current.id };
         },
         { isolationLevel: 'serializable' },
       );
@@ -399,12 +521,16 @@ export const adminOrderRoutes: FastifyPluginAsync = async (app) => {
           .code(409)
           .send({ error: 'Order status changed concurrently. Refresh and retry.' });
       }
-      if (updated.order) {
-        publishOrderUpdated(updated.order.id, 'order:updated', {
-          status: updated.order.status,
-        });
-      }
-      return updated.order;
+      const [orderRow] = await app.db
+        .select()
+        .from(orders)
+        .where(eq(orders.id, updated.orderId))
+        .limit(1);
+      if (!orderRow) throw new Error('Updated order could not be read');
+      const [order] = await loadOrdersWithDetails(app.db, [orderRow]);
+      if (!order) throw new Error('Updated order details could not be read');
+      publishOrderUpdated(order.id, 'order:updated', { status: order.status });
+      return order;
     } catch (error) {
       if (isSerializationFailure(error)) {
         return reply
@@ -441,8 +567,7 @@ export const adminOrderRoutes: FastifyPluginAsync = async (app) => {
       await app.db
         .insert(storeSettings)
         .values({ key: 'qr_payment_image', value: newImagePath, updatedAt: new Date() })
-        .onConflictDoUpdate({
-          target: storeSettings.key,
+        .onDuplicateKeyUpdate({
           set: { value: newImagePath, updatedAt: new Date() },
         });
       if (typeof oldSetting?.value === 'string') {
@@ -508,8 +633,7 @@ export const adminOrderRoutes: FastifyPluginAsync = async (app) => {
         value: parsed.data.instructions,
         updatedAt: new Date(),
       })
-      .onConflictDoUpdate({
-        target: storeSettings.key,
+      .onDuplicateKeyUpdate({
         set: { value: parsed.data.instructions, updatedAt: new Date() },
       });
     return { instructions: parsed.data.instructions };

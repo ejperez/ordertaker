@@ -1,7 +1,11 @@
 import { randomUUID } from 'node:crypto';
+import { mkdir, readFile, unlink, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import { env } from '../config/env.js';
 const maxImageBytes = 5 * 1024 * 1024;
 const storedFilenamePattern = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.(?:jpg|png|webp)$/i;
+const publicDirectory = join(env.UPLOADS_DIR, 'public');
+const privateDirectory = join(env.UPLOADS_DIR, 'private', 'payment-proofs');
 const signatures = [
     {
         mimeType: 'image/jpeg',
@@ -21,7 +25,6 @@ const signatures = [
 ];
 export class ImageValidationError extends Error {
 }
-const storageEndpoint = `${env.SUPABASE_URL.replace(/\/$/, '')}/storage/v1/object`;
 function decodeImage(data) {
     if (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(data)) {
         throw new ImageValidationError('Image data must be valid base64');
@@ -35,56 +38,30 @@ function decodeImage(data) {
         throw new ImageValidationError('Only JPEG, PNG, and WebP images are supported');
     return { bytes, extension: format.extension, contentType: format.mimeType };
 }
-function objectUrl(bucket, objectPath) {
-    const encodedPath = objectPath.split('/').map(encodeURIComponent).join('/');
-    return `${storageEndpoint}/${encodeURIComponent(bucket)}/${encodedPath}`;
+function publicImageUrl(folder, filename) {
+    return new URL(`/api/uploads/${folder}/${filename}`, env.API_PUBLIC_ORIGIN).toString();
 }
-function publicImageUrl(bucket, objectPath) {
-    return `${storageEndpoint}/public/${encodeURIComponent(bucket)}/${objectPath
-        .split('/')
-        .map(encodeURIComponent)
-        .join('/')}`;
-}
-async function storageRequest(method, bucket, objectPath, body, contentType) {
-    const url = method === 'DELETE'
-        ? `${storageEndpoint}/${encodeURIComponent(bucket)}`
-        : objectUrl(bucket, objectPath);
-    const requestBody = typeof body === 'string' ? body : body === undefined ? undefined : Uint8Array.from(body);
-    const response = await fetch(url, {
-        method,
-        headers: {
-            apikey: env.SUPABASE_SERVICE_ROLE_KEY,
-            Authorization: `Bearer ${env.SUPABASE_SERVICE_ROLE_KEY}`,
-            ...(contentType ? { 'Content-Type': contentType } : {}),
-            ...(method === 'POST' ? { 'x-upsert': 'false' } : {}),
-        },
-        ...(requestBody === undefined ? {} : { body: requestBody }),
-    });
-    if (!response.ok) {
-        throw new Error(`Supabase Storage ${method} failed (${response.status})`);
-    }
-    return response;
-}
-function publicImageObjectPath(imageUrl, folder) {
+function publicImageFilename(imagePath, folder) {
     let url;
     try {
-        url = new URL(imageUrl);
+        url = new URL(imagePath);
     }
     catch {
         throw new ImageValidationError('Invalid stored image path');
     }
-    const baseUrl = new URL(env.SUPABASE_URL);
-    const prefix = `/storage/v1/object/public/${env.SUPABASE_PRODUCT_BUCKET}/${folder}/`;
-    const filename = url.pathname.startsWith(prefix) ? url.pathname.slice(prefix.length) : '';
-    if (url.origin !== baseUrl.origin ||
+    if (url.origin !== new URL(env.API_PUBLIC_ORIGIN).origin ||
+        url.pathname.slice(0, `/api/uploads/${folder}/`.length) !== `/api/uploads/${folder}/` ||
         url.search ||
-        url.hash ||
-        !storedFilenamePattern.test(filename)) {
+        url.hash) {
         throw new ImageValidationError('Invalid stored image path');
     }
-    return `${folder}/${filename}`;
+    const filename = url.pathname.slice(`/api/uploads/${folder}/`.length);
+    if (!storedFilenamePattern.test(filename)) {
+        throw new ImageValidationError('Invalid stored image path');
+    }
+    return filename;
 }
-function paymentProofObjectPath(proofPath) {
+function paymentProofFilename(proofPath) {
     const [directory, filename, ...extraParts] = proofPath.split('/');
     if (directory !== 'payment-proofs' ||
         extraParts.length > 0 ||
@@ -92,61 +69,83 @@ function paymentProofObjectPath(proofPath) {
         !storedFilenamePattern.test(filename)) {
         throw new ImageValidationError('Invalid stored payment proof path');
     }
-    return proofPath;
+    return filename;
 }
 function imageContentType(filename) {
     const extension = filename.slice(filename.lastIndexOf('.')).toLowerCase();
     return extension === '.jpg' ? 'image/jpeg' : extension === '.png' ? 'image/png' : 'image/webp';
 }
-export class SupabaseImageStorageService {
+async function saveImage(directory, filename, bytes, privateFile = false) {
+    await mkdir(directory, { recursive: true, mode: privateFile ? 0o700 : 0o755 });
+    await writeFile(join(directory, filename), bytes, {
+        flag: 'wx',
+        mode: privateFile ? 0o600 : 0o644,
+    });
+}
+async function removeImage(directory, filename) {
+    try {
+        await unlink(join(directory, filename));
+    }
+    catch (error) {
+        if (typeof error === 'object' && error !== null && 'code' in error && error.code === 'ENOENT') {
+            return;
+        }
+        throw error;
+    }
+}
+export class LocalImageStorageService {
     async saveProductImage(data) {
         const image = decodeImage(data);
         const filename = `${randomUUID()}${image.extension}`;
-        const objectPath = `products/${filename}`;
-        await storageRequest('POST', env.SUPABASE_PRODUCT_BUCKET, objectPath, image.bytes, image.contentType);
-        return publicImageUrl(env.SUPABASE_PRODUCT_BUCKET, objectPath);
+        await saveImage(join(publicDirectory, 'products'), filename, image.bytes);
+        return publicImageUrl('products', filename);
     }
     async removeProductImage(imagePath) {
         if (!imagePath)
             return;
-        const objectPath = publicImageObjectPath(imagePath, 'products');
-        await storageRequest('DELETE', env.SUPABASE_PRODUCT_BUCKET, objectPath, JSON.stringify({ prefixes: [objectPath] }), 'application/json');
+        await removeImage(join(publicDirectory, 'products'), publicImageFilename(imagePath, 'products'));
     }
     async saveQrPaymentImage(data) {
         const image = decodeImage(data);
         const filename = `${randomUUID()}${image.extension}`;
-        const objectPath = `store/${filename}`;
-        await storageRequest('POST', env.SUPABASE_PRODUCT_BUCKET, objectPath, image.bytes, image.contentType);
-        return publicImageUrl(env.SUPABASE_PRODUCT_BUCKET, objectPath);
+        await saveImage(join(publicDirectory, 'store'), filename, image.bytes);
+        return publicImageUrl('store', filename);
     }
     async removeQrPaymentImage(imagePath) {
         if (!imagePath)
             return;
-        const objectPath = publicImageObjectPath(imagePath, 'store');
-        await storageRequest('DELETE', env.SUPABASE_PRODUCT_BUCKET, objectPath, JSON.stringify({ prefixes: [objectPath] }), 'application/json');
+        await removeImage(join(publicDirectory, 'store'), publicImageFilename(imagePath, 'store'));
     }
     async savePaymentProof(data) {
         const image = decodeImage(data);
         const filename = `${randomUUID()}${image.extension}`;
-        const objectPath = `payment-proofs/${filename}`;
-        await storageRequest('POST', env.SUPABASE_PAYMENT_PROOFS_BUCKET, objectPath, image.bytes, image.contentType);
+        await saveImage(privateDirectory, filename, image.bytes, true);
         return `payment-proofs/${filename}`;
     }
     async readPaymentProof(proofPath) {
         if (!proofPath)
             return null;
-        const objectPath = paymentProofObjectPath(proofPath);
-        const response = await storageRequest('GET', env.SUPABASE_PAYMENT_PROOFS_BUCKET, objectPath);
-        return {
-            bytes: Buffer.from(await response.arrayBuffer()),
-            contentType: imageContentType(objectPath),
-        };
+        const filename = paymentProofFilename(proofPath);
+        try {
+            return {
+                bytes: await readFile(join(privateDirectory, filename)),
+                contentType: imageContentType(filename),
+            };
+        }
+        catch (error) {
+            if (typeof error === 'object' &&
+                error !== null &&
+                'code' in error &&
+                error.code === 'ENOENT') {
+                return null;
+            }
+            throw error;
+        }
     }
     async removePaymentProof(proofPath) {
         if (!proofPath)
             return;
-        const objectPath = paymentProofObjectPath(proofPath);
-        await storageRequest('DELETE', env.SUPABASE_PAYMENT_PROOFS_BUCKET, objectPath, JSON.stringify({ prefixes: [objectPath] }), 'application/json');
+        await removeImage(privateDirectory, paymentProofFilename(proofPath));
     }
 }
-export const imageStorage = new SupabaseImageStorageService();
+export const imageStorage = new LocalImageStorageService();

@@ -3,7 +3,7 @@ import { Server } from 'socket.io';
 import { and, eq, gt } from 'drizzle-orm';
 import { env } from './config/env.js';
 import { hashSessionToken, sessionCookieName } from './auth.js';
-import { adminSessions, orders } from './db/schema/index.js';
+import { adminSessions, orders, users } from './db/schema/index.js';
 const ownerRoom = 'owners';
 let realtimeServer = null;
 function hashTrackingToken(token) {
@@ -32,17 +32,18 @@ export function attachRealtimeServer(server, db) {
             const requestedRole = socket.handshake.auth?.role;
             const ownerToken = readCookie(socket.handshake.headers.cookie, sessionCookieName);
             if (requestedRole === 'owner' && ownerToken) {
-                const session = await db.query.adminSessions.findFirst({
-                    where: and(eq(adminSessions.tokenHash, hashSessionToken(ownerToken)), gt(adminSessions.expiresAt, new Date())),
-                    columns: { expiresAt: true },
-                    with: { user: { columns: { id: true, name: true } } },
-                });
+                const [session] = await db
+                    .select({ id: users.id, name: users.name, expiresAt: adminSessions.expiresAt })
+                    .from(adminSessions)
+                    .innerJoin(users, eq(adminSessions.userId, users.id))
+                    .where(and(eq(adminSessions.tokenHash, hashSessionToken(ownerToken)), gt(adminSessions.expiresAt, new Date())))
+                    .limit(1);
                 if (!session) {
                     next(new Error('Authentication required'));
                     return;
                 }
                 socket.data.role = 'owner';
-                socket.data.owner = session.user;
+                socket.data.owner = { id: session.id, name: session.name };
                 socket.data.sessionExpiresAt = session.expiresAt.getTime();
                 next();
                 return;

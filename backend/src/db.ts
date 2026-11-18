@@ -1,10 +1,9 @@
-import { drizzle, type PostgresJsDatabase } from 'drizzle-orm/postgres-js';
-import type postgres from 'postgres';
+import { drizzle, type MySql2Database } from 'drizzle-orm/mysql2';
+import type { Pool } from 'mysql2/promise';
 import * as schema from './db/schema/index.js';
 
-export type AppDatabase = PostgresJsDatabase<typeof schema>;
+export type AppDatabase = MySql2Database<typeof schema>;
 
-export function createDatabase(client: ReturnType<typeof postgres>): AppDatabase {
-  // Workspaces resolve postgres.js through separate paths; runtime clients remain compatible.
-  return drizzle({ client: client as never, schema });
+export function createDatabase(client: Pool): AppDatabase {
+  return drizzle(client, { schema, mode: 'planetscale' });
 }
