@@ -1,6 +1,5 @@
 import bcrypt from 'bcryptjs';
-import { eq } from 'drizzle-orm';
-import mysql from 'mysql2/promise';
+import postgres from 'postgres';
 import { env } from '../src/config/env.js';
 import { createDatabase } from '../src/db.js';
 import { categories, products, storeSettings, users } from '../src/db/schema/index.js';
@@ -10,17 +9,15 @@ const ownerPassword = process.env.OWNER_PASSWORD;
 if (!ownerName || !ownerEmail || !ownerPassword || ownerPassword.length < 12) {
     throw new Error('Set OWNER_NAME, OWNER_EMAIL, and an OWNER_PASSWORD of at least 12 characters in .env.');
 }
-if (ownerName.length > 120 || ownerEmail.length > 254) {
-    throw new Error('OWNER_NAME must be at most 120 characters and OWNER_EMAIL at most 254.');
-}
-const client = mysql.createPool(env.DATABASE_URL);
+const client = postgres(env.DIRECT_URL, { prepare: false, max: 1 });
 try {
     const db = createDatabase(client);
     const passwordHash = await bcrypt.hash(ownerPassword, 12);
     await db
         .insert(users)
         .values({ name: ownerName, email: ownerEmail, passwordHash, updatedAt: new Date() })
-        .onDuplicateKeyUpdate({
+        .onConflictDoUpdate({
+        target: users.email,
         set: { name: ownerName, passwordHash, updatedAt: new Date() },
     });
     const categoryData = [
@@ -28,19 +25,19 @@ try {
         { name: 'Pasta', slug: 'pasta', sortOrder: 2 },
     ];
     for (const data of categoryData) {
-        await db
+        const [category] = await db
             .insert(categories)
             .values({ ...data, updatedAt: new Date() })
-            .onDuplicateKeyUpdate({
-            set: { name: data.name, sortOrder: data.sortOrder, isActive: true, updatedAt: new Date() },
-        });
-        const [category] = await db
-            .select()
-            .from(categories)
-            .where(eq(categories.slug, data.slug))
-            .limit(1);
-        if (!category)
-            throw new Error(`Seeded category ${data.slug} could not be read`);
+            .onConflictDoUpdate({
+            target: categories.slug,
+            set: {
+                name: data.name,
+                sortOrder: data.sortOrder,
+                isActive: true,
+                updatedAt: new Date(),
+            },
+        })
+            .returning();
         const starterProducts = category.slug === 'coffee'
             ? [
                 {
@@ -74,7 +71,8 @@ try {
                 isArchived: false,
                 updatedAt: new Date(),
             })
-                .onDuplicateKeyUpdate({
+                .onConflictDoUpdate({
+                target: products.slug,
                 set: {
                     ...product,
                     categoryId: category.id,
@@ -95,13 +93,10 @@ try {
         ['store_contact', ''],
     ];
     for (const [key, value] of settings) {
-        const [existing] = await db
-            .select({ key: storeSettings.key })
-            .from(storeSettings)
-            .where(eq(storeSettings.key, key))
-            .limit(1);
-        if (!existing)
-            await db.insert(storeSettings).values({ key, value, updatedAt: new Date() });
+        await db
+            .insert(storeSettings)
+            .values({ key, value, updatedAt: new Date() })
+            .onConflictDoNothing({ target: storeSettings.key });
     }
     console.info(`Seeded owner ${ownerEmail}, categories, starter products, and store settings.`);
 }

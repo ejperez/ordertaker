@@ -1,7 +1,7 @@
-import { json, mysqlTable, timestamp, varchar } from 'drizzle-orm/mysql-core';
+import { jsonb, pgTable, text, timestamp } from 'drizzle-orm/pg-core';
 
-export const storeSettings = mysqlTable('store_settings', {
-  key: varchar('key', { length: 100 }).primaryKey(),
-  value: json('value').$type<unknown>().notNull(),
-  updatedAt: timestamp('updated_at', { fsp: 3 }).notNull(),
+export const storeSettings = pgTable('store_settings', {
+  key: text('key').primaryKey(),
+  value: jsonb('value').$type<unknown>().notNull(),
+  updatedAt: timestamp('updated_at', { precision: 3 }).notNull(),
 });

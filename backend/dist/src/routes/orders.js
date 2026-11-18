@@ -1,4 +1,4 @@
-import { createHash, randomBytes, randomUUID } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { and, eq, inArray, asc } from 'drizzle-orm';
 import { z } from 'zod';
 import { categories, messages, orderItems, orderStatusHistories, orders, paymentStatusHistories, payments, products, storeSettings, } from '../db/schema/index.js';
@@ -227,17 +227,15 @@ export const orderRoutes = async (app) => {
             .limit(1);
         if (!order)
             return reply.code(404).send({ error: 'Order not found' });
-        const id = randomUUID();
-        await app.db.insert(messages).values({
-            id,
+        const [message] = await app.db
+            .insert(messages)
+            .values({
             orderId: order.id,
             senderType: 'CUSTOMER',
             senderName: order.customerName,
             message: parsed.data.message,
-        });
-        const [message] = await app.db.select().from(messages).where(eq(messages.id, id)).limit(1);
-        if (!message)
-            throw new Error('Inserted message could not be read');
+        })
+            .returning();
         publishNewMessage(order.id, message);
         return reply.code(201).send(message);
     });
@@ -277,7 +275,7 @@ export const orderRoutes = async (app) => {
                     return { kind: 'missing' };
                 if (payment.status !== 'REJECTED')
                     return { kind: 'invalid' };
-                const [updated] = await transaction
+                const updated = await transaction
                     .update(payments)
                     .set({
                     status: 'AWAITING_VERIFICATION',
@@ -288,8 +286,9 @@ export const orderRoutes = async (app) => {
                     rejectionReason: null,
                     updatedAt: new Date(),
                 })
-                    .where(and(eq(payments.id, payment.id), eq(payments.method, 'QR'), eq(payments.status, 'REJECTED')));
-                if (updated.affectedRows !== 1)
+                    .where(and(eq(payments.id, payment.id), eq(payments.method, 'QR'), eq(payments.status, 'REJECTED')))
+                    .returning({ id: payments.id });
+                if (updated.length !== 1)
                     return { kind: 'conflict' };
                 await transaction.insert(paymentStatusHistories).values({
                     paymentId: payment.id,
@@ -443,9 +442,9 @@ export const orderRoutes = async (app) => {
                 }
                 const trackingToken = createTrackingToken();
                 const paymentStatus = data.paymentMethod === 'QR' ? 'AWAITING_VERIFICATION' : 'UNPAID';
-                const now = new Date();
-                const order = {
-                    id: randomUUID(),
+                const [order] = await transaction
+                    .insert(orders)
+                    .values({
                     orderNumber: createOrderNumber(),
                     customerName: data.customerName,
                     customerPhone: data.customerPhone,
@@ -456,38 +455,33 @@ export const orderRoutes = async (app) => {
                     deliveryInstructions: data.fulfillmentType === 'DELIVERY'
                         ? data.deliveryInstructions?.trim() || null
                         : null,
-                    status: 'PENDING',
                     paymentMethod: data.paymentMethod,
                     subtotal: centsToDecimal(subtotalCents),
                     deliveryFee: centsToDecimal(deliveryFeeCents),
                     total: centsToDecimal(totalCents),
                     trackingTokenHash: hashValue(trackingToken),
                     idempotencyKeyHash,
-                    createdAt: now,
-                    updatedAt: now,
-                };
-                await transaction.insert(orders).values(order);
-                const insertedItems = itemsToInsert.map((item) => ({
-                    ...item,
-                    id: randomUUID(),
-                    orderId: order.id,
-                    createdAt: now,
-                }));
-                await transaction.insert(orderItems).values(insertedItems);
-                const paymentId = randomUUID();
-                await transaction.insert(payments).values({
-                    id: paymentId,
+                    updatedAt: new Date(),
+                })
+                    .returning();
+                const insertedItems = await transaction
+                    .insert(orderItems)
+                    .values(itemsToInsert.map((item) => ({ ...item, orderId: order.id })))
+                    .returning();
+                const [payment] = await transaction
+                    .insert(payments)
+                    .values({
                     orderId: order.id,
                     method: data.paymentMethod,
                     status: paymentStatus,
                     amount: centsToDecimal(totalCents),
                     referenceNumber: data.paymentMethod === 'QR' ? data.referenceNumber?.trim() || null : null,
                     proofImagePath: paymentProofPath,
-                    createdAt: now,
-                    updatedAt: now,
-                });
+                    updatedAt: new Date(),
+                })
+                    .returning();
                 await transaction.insert(paymentStatusHistories).values({
-                    paymentId,
+                    paymentId: payment.id,
                     newStatus: paymentStatus,
                     actorType: data.paymentMethod === 'QR' ? 'CUSTOMER' : 'SYSTEM',
                     note: data.paymentMethod === 'QR'

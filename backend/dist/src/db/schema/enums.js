@@ -1,6 +1,7 @@
-export const userRoleValues = ['OWNER'];
-export const fulfillmentTypeValues = ['DELIVERY', 'PICKUP'];
-export const orderStatusValues = [
+import { pgEnum } from 'drizzle-orm/pg-core';
+export const userRole = pgEnum('UserRole', ['OWNER']);
+export const fulfillmentType = pgEnum('FulfillmentType', ['DELIVERY', 'PICKUP']);
+export const orderStatus = pgEnum('OrderStatus', [
     'PENDING',
     'IN_KITCHEN',
     'OUT_FOR_DELIVERY',
@@ -8,14 +9,14 @@ export const orderStatusValues = [
     'DELIVERED',
     'PICKED_UP',
     'CANCELLED',
-];
-export const paymentMethodValues = ['COD', 'QR'];
-export const paymentStatusValues = [
+]);
+export const paymentMethod = pgEnum('PaymentMethod', ['COD', 'QR']);
+export const paymentStatus = pgEnum('PaymentStatus', [
     'UNPAID',
     'AWAITING_VERIFICATION',
     'PAID',
     'REJECTED',
     'REFUNDED',
-];
-export const paymentActorTypeValues = ['CUSTOMER', 'OWNER', 'SYSTEM'];
-export const messageSenderTypeValues = ['CUSTOMER', 'OWNER'];
+]);
+export const paymentActorType = pgEnum('PaymentActorType', ['CUSTOMER', 'OWNER', 'SYSTEM']);
+export const messageSenderType = pgEnum('MessageSenderType', ['CUSTOMER', 'OWNER']);

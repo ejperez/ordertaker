@@ -1,15 +1,15 @@
 import { randomUUID } from 'node:crypto';
-import { index, mysqlEnum, mysqlTable, text, timestamp, varchar } from 'drizzle-orm/mysql-core';
+import { index, pgTable, text, timestamp } from 'drizzle-orm/pg-core';
 import { orders } from './orders.js';
-import { messageSenderTypeValues } from './enums.js';
+import { messageSenderType } from './enums.js';
 const generatedId = () => randomUUID();
-export const messages = mysqlTable('messages', {
-    id: varchar('id', { length: 36 }).primaryKey().$defaultFn(generatedId),
-    orderId: varchar('order_id', { length: 36 })
+export const messages = pgTable('messages', {
+    id: text('id').primaryKey().$defaultFn(generatedId),
+    orderId: text('order_id')
         .notNull()
         .references(() => orders.id, { onDelete: 'cascade', onUpdate: 'cascade' }),
-    senderType: mysqlEnum('sender_type', messageSenderTypeValues).notNull(),
-    senderName: varchar('sender_name', { length: 120 }).notNull(),
+    senderType: messageSenderType('sender_type').notNull(),
+    senderName: text('sender_name').notNull(),
     message: text('message').notNull(),
-    createdAt: timestamp('created_at', { fsp: 3 }).notNull().defaultNow(),
+    createdAt: timestamp('created_at', { precision: 3 }).notNull().defaultNow(),
 }, (table) => [index('messages_order_id_created_at_idx').on(table.orderId, table.createdAt)]);

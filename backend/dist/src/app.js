@@ -10,7 +10,6 @@ import { healthRoutes } from './routes/health.js';
 import { attachRealtimeServer, closeRealtimeServer } from './realtime.js';
 import { databasePlugin } from './plugins/database.js';
 import { frontendPlugin } from './plugins/frontend.js';
-import { uploadsPlugin } from './plugins/uploads.js';
 export async function buildApp() {
     const app = Fastify({ logger: true });
     app.decorateRequest('owner', null);
@@ -18,7 +17,6 @@ export async function buildApp() {
         await closeRealtimeServer();
     });
     await databasePlugin(app, {});
-    await app.register(uploadsPlugin);
     await app.register(cors, {
         origin: env.FRONTEND_ORIGIN,
         credentials: true,

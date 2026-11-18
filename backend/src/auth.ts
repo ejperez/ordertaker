@@ -1,7 +1,7 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { and, eq, gt } from 'drizzle-orm';
 import type { FastifyReply, FastifyRequest } from 'fastify';
-import { adminSessions, users } from './db/schema/auth.js';
+import { adminSessions } from './db/schema/auth.js';
 import { env } from './config/env.js';
 
 export const sessionCookieName = 'ordertaker_admin';
@@ -61,24 +61,20 @@ export async function requireOwner(request: FastifyRequest, reply: FastifyReply)
     return;
   }
 
-  const [owner] = await request.server.db
-    .select({ id: users.id, name: users.name, email: users.email })
-    .from(adminSessions)
-    .innerJoin(users, eq(adminSessions.userId, users.id))
-    .where(
-      and(
-        eq(adminSessions.tokenHash, hashSessionToken(token)),
-        gt(adminSessions.expiresAt, new Date()),
-      ),
-    )
-    .limit(1);
-  if (!owner) {
+  const session = await request.server.db.query.adminSessions.findFirst({
+    where: and(
+      eq(adminSessions.tokenHash, hashSessionToken(token)),
+      gt(adminSessions.expiresAt, new Date()),
+    ),
+    with: { user: { columns: { id: true, name: true, email: true } } },
+  });
+  if (!session) {
     clearSessionCookie(reply);
     await reply.code(401).send({ error: 'Authentication required' });
     return;
   }
 
-  request.owner = owner;
+  request.owner = session.user;
 }
 
 export function createSessionToken(): string {

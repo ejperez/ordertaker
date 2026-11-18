@@ -1,14 +1,13 @@
-import { randomUUID } from 'node:crypto';
-import { and, asc, desc, eq, exists, gte, inArray, lte } from 'drizzle-orm';
+import { and, asc, desc, eq, exists, gte, lte } from 'drizzle-orm';
 import { z } from 'zod';
 import { hasValidOrigin, requireOwner } from '../auth.js';
 import { isSerializationFailure } from '../db/errors.js';
-import { messages, orderItems, orderStatusHistories, orders, paymentStatusHistories, payments, storeSettings, users, } from '../db/schema/index.js';
-import { orderStatusValues, paymentStatusValues } from '../db/schema/enums.js';
+import { messages, orderItems, orderStatusHistories, orders, paymentStatusHistories, payments, storeSettings, } from '../db/schema/index.js';
+import { orderStatus, paymentStatus } from '../db/schema/enums.js';
 import { ImageValidationError, imageStorage } from '../services/image-storage.js';
 import { publishNewMessage, publishOrderUpdated } from '../realtime.js';
-const orderStatuses = orderStatusValues;
-const paymentStatuses = paymentStatusValues;
+const orderStatuses = orderStatus.enumValues;
+const paymentStatuses = paymentStatus.enumValues;
 const filtersSchema = z.object({
     status: z.enum(orderStatuses).optional(),
     fulfillmentType: z.enum(['DELIVERY', 'PICKUP']).optional(),
@@ -53,159 +52,30 @@ const validTransitions = {
     PICKED_UP: [],
     CANCELLED: [],
 };
-async function loadOrdersWithDetails(db, orderRows) {
-    if (!orderRows.length)
-        return [];
-    const orderIds = orderRows.map((order) => order.id);
-    const [itemRows, paymentRows, historyRows] = await Promise.all([
-        db
-            .select()
-            .from(orderItems)
-            .where(inArray(orderItems.orderId, orderIds))
-            .orderBy(asc(orderItems.createdAt)),
-        db
-            .select({
-            id: payments.id,
-            orderId: payments.orderId,
-            method: payments.method,
-            status: payments.status,
-            amount: payments.amount,
-            referenceNumber: payments.referenceNumber,
-            rejectionReason: payments.rejectionReason,
-            verifiedAt: payments.verifiedAt,
-            verifiedByName: users.name,
-        })
-            .from(payments)
-            .leftJoin(users, eq(payments.verifiedById, users.id))
-            .where(inArray(payments.orderId, orderIds)),
-        db
-            .select({
-            id: orderStatusHistories.id,
-            orderId: orderStatusHistories.orderId,
-            oldStatus: orderStatusHistories.oldStatus,
-            newStatus: orderStatusHistories.newStatus,
-            changedByUserId: orderStatusHistories.changedByUserId,
-            note: orderStatusHistories.note,
-            createdAt: orderStatusHistories.createdAt,
-            changedByName: users.name,
-        })
-            .from(orderStatusHistories)
-            .leftJoin(users, eq(orderStatusHistories.changedByUserId, users.id))
-            .where(inArray(orderStatusHistories.orderId, orderIds))
-            .orderBy(asc(orderStatusHistories.createdAt)),
-    ]);
-    const paymentIds = paymentRows.map((payment) => payment.id);
-    const paymentHistoryRows = paymentIds.length
-        ? await db
-            .select({
-            id: paymentStatusHistories.id,
-            paymentId: paymentStatusHistories.paymentId,
-            oldStatus: paymentStatusHistories.oldStatus,
-            newStatus: paymentStatusHistories.newStatus,
-            actorType: paymentStatusHistories.actorType,
-            changedByUserId: paymentStatusHistories.changedByUserId,
-            note: paymentStatusHistories.note,
-            createdAt: paymentStatusHistories.createdAt,
-            changedByName: users.name,
-        })
-            .from(paymentStatusHistories)
-            .leftJoin(users, eq(paymentStatusHistories.changedByUserId, users.id))
-            .where(inArray(paymentStatusHistories.paymentId, paymentIds))
-            .orderBy(asc(paymentStatusHistories.createdAt))
-        : [];
-    const itemsByOrderId = new Map();
-    for (const item of itemRows) {
-        const items = itemsByOrderId.get(item.orderId) ?? [];
-        items.push(item);
-        itemsByOrderId.set(item.orderId, items);
-    }
-    const paymentByOrderId = new Map(paymentRows.map((payment) => [payment.orderId, payment]));
-    const paymentHistoryById = new Map();
-    for (const history of paymentHistoryRows) {
-        const histories = paymentHistoryById.get(history.paymentId) ?? [];
-        histories.push(history);
-        paymentHistoryById.set(history.paymentId, histories);
-    }
-    const orderHistoryById = new Map();
-    for (const history of historyRows) {
-        const histories = orderHistoryById.get(history.orderId) ?? [];
-        histories.push(history);
-        orderHistoryById.set(history.orderId, histories);
-    }
-    return orderRows.map((order) => {
-        const payment = paymentByOrderId.get(order.id);
-        return {
-            ...order,
-            items: itemsByOrderId.get(order.id) ?? [],
-            payment: payment
-                ? {
-                    method: payment.method,
-                    status: payment.status,
-                    amount: payment.amount,
-                    referenceNumber: payment.referenceNumber,
-                    rejectionReason: payment.rejectionReason,
-                    verifiedAt: payment.verifiedAt,
-                    verifiedBy: payment.verifiedByName === null ? null : { name: payment.verifiedByName },
-                    statusHistory: (paymentHistoryById.get(payment.id) ?? []).map(({ changedByName, ...history }) => ({
-                        ...history,
-                        changedBy: changedByName === null ? null : { name: changedByName },
-                    })),
-                }
-                : null,
-            statusHistory: (orderHistoryById.get(order.id) ?? []).map(({ changedByName, ...history }) => ({
-                ...history,
-                changedBy: changedByName === null ? null : { name: changedByName },
-            })),
-        };
-    });
-}
-async function loadPaymentDetails(db, paymentId) {
-    const [payment] = await db
-        .select({
-        method: payments.method,
-        status: payments.status,
-        amount: payments.amount,
-        referenceNumber: payments.referenceNumber,
-        rejectionReason: payments.rejectionReason,
-        verifiedAt: payments.verifiedAt,
-        verifiedByName: users.name,
-    })
-        .from(payments)
-        .leftJoin(users, eq(payments.verifiedById, users.id))
-        .where(eq(payments.id, paymentId))
-        .limit(1);
-    if (!payment)
-        return null;
-    const historyRows = await db
-        .select({
-        id: paymentStatusHistories.id,
-        paymentId: paymentStatusHistories.paymentId,
-        oldStatus: paymentStatusHistories.oldStatus,
-        newStatus: paymentStatusHistories.newStatus,
-        actorType: paymentStatusHistories.actorType,
-        changedByUserId: paymentStatusHistories.changedByUserId,
-        note: paymentStatusHistories.note,
-        createdAt: paymentStatusHistories.createdAt,
-        changedByName: users.name,
-    })
-        .from(paymentStatusHistories)
-        .leftJoin(users, eq(paymentStatusHistories.changedByUserId, users.id))
-        .where(eq(paymentStatusHistories.paymentId, paymentId))
-        .orderBy(asc(paymentStatusHistories.createdAt));
-    return {
-        method: payment.method,
-        status: payment.status,
-        amount: payment.amount,
-        referenceNumber: payment.referenceNumber,
-        rejectionReason: payment.rejectionReason,
-        verifiedAt: payment.verifiedAt,
-        verifiedBy: payment.verifiedByName === null ? null : { name: payment.verifiedByName },
-        statusHistory: historyRows.map(({ changedByName, ...history }) => ({
-            ...history,
-            changedBy: changedByName === null ? null : { name: changedByName },
-        })),
-    };
-}
+const orderWithDetails = {
+    items: { orderBy: [asc(orderItems.createdAt)] },
+    payment: {
+        columns: {
+            method: true,
+            status: true,
+            amount: true,
+            referenceNumber: true,
+            rejectionReason: true,
+            verifiedAt: true,
+        },
+        with: {
+            verifiedBy: { columns: { name: true } },
+            statusHistory: {
+                orderBy: [asc(paymentStatusHistories.createdAt)],
+                with: { changedBy: { columns: { name: true } } },
+            },
+        },
+    },
+    statusHistory: {
+        orderBy: [asc(orderStatusHistories.createdAt)],
+        with: { changedBy: { columns: { name: true } } },
+    },
+};
 export const adminOrderRoutes = async (app) => {
     app.addHook('preHandler', requireOwner);
     app.addHook('preHandler', async (request, reply) => {
@@ -237,21 +107,18 @@ export const adminOrderRoutes = async (app) => {
                 .from(payments)
                 .where(and(eq(payments.orderId, orders.id), eq(payments.status, paymentStatusFilter)))));
         }
-        const orderRows = await app.db
-            .select()
-            .from(orders)
-            .where(conditions.length ? and(...conditions) : undefined)
-            .orderBy(desc(orders.createdAt))
-            .limit(200);
-        return loadOrdersWithDetails(app.db, orderRows);
+        return app.db.query.orders.findMany({
+            where: conditions.length ? and(...conditions) : undefined,
+            with: orderWithDetails,
+            orderBy: [desc(orders.createdAt)],
+            limit: 200,
+        });
     });
     app.get('/orders/:id', async (request, reply) => {
-        const [orderRow] = await app.db
-            .select()
-            .from(orders)
-            .where(eq(orders.id, request.params.id))
-            .limit(1);
-        const [order] = await loadOrdersWithDetails(app.db, orderRow ? [orderRow] : []);
+        const order = await app.db.query.orders.findFirst({
+            where: eq(orders.id, request.params.id),
+            with: orderWithDetails,
+        });
         if (!order)
             return reply.code(404).send({ error: 'Order not found' });
         return order;
@@ -283,17 +150,15 @@ export const adminOrderRoutes = async (app) => {
             .limit(1);
         if (!order)
             return reply.code(404).send({ error: 'Order not found' });
-        const id = randomUUID();
-        await app.db.insert(messages).values({
-            id,
+        const [message] = await app.db
+            .insert(messages)
+            .values({
             orderId: order.id,
             senderType: 'OWNER',
             senderName: request.owner.name,
             message: parsed.data.message,
-        });
-        const [message] = await app.db.select().from(messages).where(eq(messages.id, id)).limit(1);
-        if (!message)
-            throw new Error('Inserted message could not be read');
+        })
+            .returning();
         publishNewMessage(order.id, message);
         return reply.code(201).send(message);
     });
@@ -344,7 +209,7 @@ export const adminOrderRoutes = async (app) => {
                 if (!validQrReview && !validCodCollection) {
                     return { kind: 'invalid', method: payment.method, status: payment.status };
                 }
-                const [updated] = await transaction
+                const updated = await transaction
                     .update(payments)
                     .set({
                     status: parsed.data.status,
@@ -353,8 +218,9 @@ export const adminOrderRoutes = async (app) => {
                     rejectionReason: parsed.data.status === 'REJECTED' ? parsed.data.rejectionReason : null,
                     updatedAt: new Date(),
                 })
-                    .where(and(eq(payments.id, payment.id), eq(payments.method, payment.method), eq(payments.status, payment.status)));
-                if (updated.affectedRows !== 1)
+                    .where(and(eq(payments.id, payment.id), eq(payments.method, payment.method), eq(payments.status, payment.status)))
+                    .returning({ id: payments.id });
+                if (updated.length !== 1)
                     return { kind: 'conflict' };
                 await transaction.insert(paymentStatusHistories).values({
                     paymentId: payment.id,
@@ -368,7 +234,25 @@ export const adminOrderRoutes = async (app) => {
                             ? 'Cash payment collected.'
                             : 'QR payment verified.',
                 });
-                return { kind: 'success', paymentId: payment.id };
+                const updatedPayment = await transaction.query.payments.findFirst({
+                    where: eq(payments.id, payment.id),
+                    columns: {
+                        method: true,
+                        status: true,
+                        amount: true,
+                        referenceNumber: true,
+                        rejectionReason: true,
+                        verifiedAt: true,
+                    },
+                    with: {
+                        verifiedBy: { columns: { name: true } },
+                        statusHistory: {
+                            orderBy: [asc(paymentStatusHistories.createdAt)],
+                            with: { changedBy: { columns: { name: true } } },
+                        },
+                    },
+                });
+                return { kind: 'success', payment: updatedPayment };
             }, { isolationLevel: 'serializable' });
             if (result.kind === 'missing')
                 return reply.code(404).send({ error: 'Payment not found' });
@@ -384,13 +268,12 @@ export const adminOrderRoutes = async (app) => {
                     .code(409)
                     .send({ error: 'Payment status changed concurrently. Refresh and retry.' });
             }
-            const updatedPayment = await loadPaymentDetails(app.db, result.paymentId);
-            if (!updatedPayment)
-                throw new Error('Updated payment could not be read');
-            publishOrderUpdated(request.params.id, 'payment:updated', {
-                status: updatedPayment.status,
-            });
-            return updatedPayment;
+            if (result.payment) {
+                publishOrderUpdated(request.params.id, 'payment:updated', {
+                    status: result.payment.status,
+                });
+            }
+            return result.payment;
         }
         catch (error) {
             if (isSerializationFailure(error)) {
@@ -410,18 +293,16 @@ export const adminOrderRoutes = async (app) => {
         }
         try {
             const updated = await app.db.transaction(async (transaction) => {
-                const [current] = await transaction
-                    .select({
-                    id: orders.id,
-                    status: orders.status,
-                    fulfillmentType: orders.fulfillmentType,
-                    paymentMethod: orders.paymentMethod,
-                    paymentStatus: payments.status,
-                })
-                    .from(orders)
-                    .leftJoin(payments, eq(payments.orderId, orders.id))
-                    .where(eq(orders.id, request.params.id))
-                    .limit(1);
+                const current = await transaction.query.orders.findFirst({
+                    where: eq(orders.id, request.params.id),
+                    columns: {
+                        id: true,
+                        status: true,
+                        fulfillmentType: true,
+                        paymentMethod: true,
+                    },
+                    with: { payment: { columns: { status: true } } },
+                });
                 if (!current)
                     return { kind: 'missing' };
                 if (!validTransitions[current.status].includes(parsed.data.status)) {
@@ -433,14 +314,15 @@ export const adminOrderRoutes = async (app) => {
                 }
                 if (parsed.data.status === 'IN_KITCHEN' &&
                     current.paymentMethod === 'QR' &&
-                    current.paymentStatus !== 'PAID') {
+                    current.payment?.status !== 'PAID') {
                     return { kind: 'unpaid-qr' };
                 }
-                const [update] = await transaction
+                const update = await transaction
                     .update(orders)
                     .set({ status: parsed.data.status, updatedAt: new Date() })
-                    .where(and(eq(orders.id, current.id), eq(orders.status, current.status)));
-                if (update.affectedRows !== 1)
+                    .where(and(eq(orders.id, current.id), eq(orders.status, current.status)))
+                    .returning({ id: orders.id });
+                if (update.length !== 1)
                     return { kind: 'conflict' };
                 await transaction.insert(orderStatusHistories).values({
                     orderId: current.id,
@@ -449,7 +331,11 @@ export const adminOrderRoutes = async (app) => {
                     changedByUserId: request.owner.id,
                     note: parsed.data.note || null,
                 });
-                return { kind: 'success', orderId: current.id };
+                const order = await transaction.query.orders.findFirst({
+                    where: eq(orders.id, current.id),
+                    with: orderWithDetails,
+                });
+                return { kind: 'success', order };
             }, { isolationLevel: 'serializable' });
             if (updated.kind === 'missing')
                 return reply.code(404).send({ error: 'Order not found' });
@@ -468,18 +354,12 @@ export const adminOrderRoutes = async (app) => {
                     .code(409)
                     .send({ error: 'Order status changed concurrently. Refresh and retry.' });
             }
-            const [orderRow] = await app.db
-                .select()
-                .from(orders)
-                .where(eq(orders.id, updated.orderId))
-                .limit(1);
-            if (!orderRow)
-                throw new Error('Updated order could not be read');
-            const [order] = await loadOrdersWithDetails(app.db, [orderRow]);
-            if (!order)
-                throw new Error('Updated order details could not be read');
-            publishOrderUpdated(order.id, 'order:updated', { status: order.status });
-            return order;
+            if (updated.order) {
+                publishOrderUpdated(updated.order.id, 'order:updated', {
+                    status: updated.order.status,
+                });
+            }
+            return updated.order;
         }
         catch (error) {
             if (isSerializationFailure(error)) {
@@ -514,7 +394,8 @@ export const adminOrderRoutes = async (app) => {
             await app.db
                 .insert(storeSettings)
                 .values({ key: 'qr_payment_image', value: newImagePath, updatedAt: new Date() })
-                .onDuplicateKeyUpdate({
+                .onConflictDoUpdate({
+                target: storeSettings.key,
                 set: { value: newImagePath, updatedAt: new Date() },
             });
             if (typeof oldSetting?.value === 'string') {
@@ -581,7 +462,8 @@ export const adminOrderRoutes = async (app) => {
             value: parsed.data.instructions,
             updatedAt: new Date(),
         })
-            .onDuplicateKeyUpdate({
+            .onConflictDoUpdate({
+            target: storeSettings.key,
             set: { value: parsed.data.instructions, updatedAt: new Date() },
         });
         return { instructions: parsed.data.instructions };

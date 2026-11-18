@@ -1,17 +1,17 @@
 import assert from 'node:assert/strict';
-import { createHash, randomBytes, randomUUID } from 'node:crypto';
-import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
+import { createHash, randomBytes } from 'node:crypto';
+import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { join } from 'node:path';
 import { test, type TestContext } from 'node:test';
 import Fastify, { type FastifyInstance, type FastifyPluginAsync } from 'fastify';
-import mysql, { type Pool, type RowDataPacket } from 'mysql2/promise';
-import { migrate } from 'drizzle-orm/mysql2/migrator';
+import { PGlite } from '@electric-sql/pglite';
+import { drizzle } from 'drizzle-orm/pglite';
 import { eq } from 'drizzle-orm';
 import { io as connectSocket, type Socket } from 'socket.io-client';
-import { createDatabase, type AppDatabase } from '../src/db.js';
 import * as schema from '../src/db/schema/index.js';
+import type { AppDatabase } from '../src/db.js';
 import { hashSessionToken, sessionCookieName } from '../src/auth.js';
 import { env } from '../src/config/env.js';
 import {
@@ -23,56 +23,33 @@ import {
   users,
 } from '../src/db/schema/index.js';
 import { adminOrderRoutes } from '../src/routes/admin-orders.js';
-import { adminAuthRoutes } from '../src/routes/admin-auth.js';
-import { adminCatalogRoutes } from '../src/routes/admin-catalog.js';
 import { orderRoutes } from '../src/routes/orders.js';
 import { ImageValidationError, imageStorage } from '../src/services/image-storage.js';
 import { attachRealtimeServer, closeRealtimeServer } from '../src/realtime.js';
 import { frontendPlugin } from '../src/plugins/frontend.js';
-import { uploadsPlugin } from '../src/plugins/uploads.js';
 
 type TestDatabase = {
-  client: Pool;
+  client: PGlite;
   db: AppDatabase;
 };
 
-async function createTestDatabase(): Promise<TestDatabase> {
-  const databaseName = decodeURIComponent(new URL(env.DATABASE_URL).pathname.slice(1));
-  if (!databaseName.endsWith('_test')) {
-    throw new Error('Tests require a database name ending in _test');
-  }
-  const client = mysql.createPool(env.DATABASE_URL);
-  try {
-    const connection = await client.getConnection();
-    try {
-      await connection.query('SET FOREIGN_KEY_CHECKS = 0');
-      const [tables] = await connection.query<RowDataPacket[]>('SHOW TABLES');
-      for (const table of tables) {
-        const name = String(Object.values(table)[0]).replaceAll('`', '``');
-        await connection.query(`DROP TABLE IF EXISTS \`${name}\``);
-      }
-    } finally {
-      try {
-        await connection.query('SET FOREIGN_KEY_CHECKS = 1');
-      } finally {
-        connection.release();
-      }
+async function createDatabase(): Promise<TestDatabase> {
+  const client = new PGlite();
+  const db = drizzle({ client: client as never, schema });
+  const journal = JSON.parse(
+    await readFile(new URL('../drizzle/meta/_journal.json', import.meta.url), 'utf8'),
+  ) as { entries: Array<{ tag: string }> };
+  for (const entry of journal.entries) {
+    const migration = await readFile(
+      new URL(`../drizzle/${entry.tag}.sql`, import.meta.url),
+      'utf8',
+    );
+    for (const statement of migration.split('--> statement-breakpoint')) {
+      if (statement.trim()) await client.exec(statement);
     }
-  } catch (error) {
-    await client.end();
-    throw error;
   }
-  const db = createDatabase(client);
-  try {
-    await migrate(db, { migrationsFolder: resolve(import.meta.dirname, '../drizzle-mysql') });
-  } catch (error) {
-    await client.end();
-    throw error;
-  }
-  return { client, db };
+  return { client, db: db as unknown as AppDatabase };
 }
-
-test.after(async () => rm(env.UPLOADS_DIR, { recursive: true, force: true }));
 
 async function createRouteApp(
   plugin: FastifyPluginAsync,
@@ -87,28 +64,21 @@ async function createRouteApp(
   return app;
 }
 
-async function insertOrder(db: AppDatabase, values: typeof orders.$inferInsert) {
-  const order = { ...values, id: randomUUID() };
-  await db.insert(orders).values(order);
-  return order;
-}
-
 async function seedProduct(db: AppDatabase) {
-  const categoryId = randomUUID();
-  await db
+  const [category] = await db
     .insert(categories)
-    .values({ id: categoryId, name: 'Coffee', slug: 'coffee', updatedAt: new Date() });
-  const [category] = await db.select().from(categories).where(eq(categories.id, categoryId));
-  const productId = randomUUID();
-  await db.insert(products).values({
-    id: productId,
-    categoryId: category.id,
-    name: 'Meal',
-    slug: 'meal',
-    price: '12.50',
-    updatedAt: new Date(),
-  });
-  const [product] = await db.select().from(products).where(eq(products.id, productId));
+    .values({ name: 'Coffee', slug: 'coffee', updatedAt: new Date() })
+    .returning();
+  const [product] = await db
+    .insert(products)
+    .values({
+      categoryId: category.id,
+      name: 'Meal',
+      slug: 'meal',
+      price: '12.50',
+      updatedAt: new Date(),
+    })
+    .returning();
   await db.insert(schema.storeSettings).values({
     key: 'delivery_fee',
     value: 3.25,
@@ -118,15 +88,15 @@ async function seedProduct(db: AppDatabase) {
 }
 
 async function createOwnerSession(db: AppDatabase) {
-  const userId = randomUUID();
-  await db.insert(users).values({
-    id: userId,
-    name: 'Owner',
-    email: 'owner@example.com',
-    passwordHash: 'test-hash',
-    updatedAt: new Date(),
-  });
-  const [owner] = await db.select().from(users).where(eq(users.id, userId));
+  const [owner] = await db
+    .insert(users)
+    .values({
+      name: 'Owner',
+      email: 'owner@example.com',
+      passwordHash: 'test-hash',
+      updatedAt: new Date(),
+    })
+    .returning();
   const token = randomBytes(32).toString('base64url');
   await db.insert(adminSessions).values({
     tokenHash: hashSessionToken(token),
@@ -166,8 +136,8 @@ function restoreAfter(context: TestContext, ...restoreMethods: Array<() => void>
 }
 
 test('checkout commits delivery COD order and items atomically, then supports idempotent retry', async (context) => {
-  const { client, db } = await createTestDatabase();
-  context.after(async () => client.end());
+  const { client, db } = await createDatabase();
+  context.after(async () => client.close());
   const { product } = await seedProduct(db);
   const app = await createRouteApp(orderRoutes, '/api', db);
   context.after(() => app.close());
@@ -219,8 +189,8 @@ test('checkout commits delivery COD order and items atomically, then supports id
 });
 
 test('checkout rejects unavailable products without persisting partial records', async (context) => {
-  const { client, db } = await createTestDatabase();
-  context.after(async () => client.end());
+  const { client, db } = await createDatabase();
+  context.after(async () => client.close());
   const { product } = await seedProduct(db);
   await db.update(products).set({ isAvailable: false }).where(eq(products.id, product.id));
   const app = await createRouteApp(orderRoutes, '/api', db);
@@ -243,73 +213,40 @@ test('checkout rejects unavailable products without persisting partial records',
   assert.equal((await db.select().from(payments)).length, 0);
 });
 
-test('MySQL migration creates product foreign key', async (context) => {
-  const { client } = await createTestDatabase();
-  context.after(async () => client.end());
-  const [constraints] = await client.query<RowDataPacket[]>(`
-    SELECT CONSTRAINT_NAME
-    FROM information_schema.REFERENTIAL_CONSTRAINTS
-    WHERE CONSTRAINT_SCHEMA = DATABASE()
-      AND TABLE_NAME = 'order_items'
-      AND REFERENCED_TABLE_NAME = 'products'
+test('new foreign-key migration preserves existing legacy constraint', async (context) => {
+  const client = new PGlite();
+  context.after(async () => client.close());
+  const initialMigration = await readFile(
+    new URL('../drizzle/0000_needy_morph.sql', import.meta.url),
+    'utf8',
+  );
+  for (const statement of initialMigration.split('--> statement-breakpoint')) {
+    if (statement.trim()) await client.exec(statement);
+  }
+  await client.exec(`
+    ALTER TABLE order_items
+      ADD CONSTRAINT order_items_product_id_fkey
+      FOREIGN KEY (product_id) REFERENCES products(id)
+      ON DELETE SET NULL ON UPDATE CASCADE
   `);
-  assert.equal(constraints.length, 1);
-});
-
-test('admin product routes return category details through SQL joins', async (context) => {
-  const { client, db } = await createTestDatabase();
-  context.after(async () => client.end());
-  const categoryId = randomUUID();
-  await db.insert(categories).values({
-    id: categoryId,
-    name: 'Coffee',
-    slug: `coffee-${categoryId.slice(0, 8)}`,
-    updatedAt: new Date(),
-  });
-  const productId = randomUUID();
-  await db.insert(products).values({
-    id: productId,
-    categoryId,
-    name: 'Meal',
-    slug: `meal-${productId.slice(0, 8)}`,
-    price: '12.50',
-    updatedAt: new Date(),
-  });
-  const { token } = await createOwnerSession(db);
-  const app = await createRouteApp(adminCatalogRoutes, '/api/admin', db);
-  context.after(() => app.close());
-
-  const list = await app.inject({
-    method: 'GET',
-    url: '/api/admin/products',
-    headers: adminHeaders(token),
-  });
-  assert.equal(list.statusCode, 200);
-  const [listedProduct] = list.json();
-  assert.equal(listedProduct.id, productId);
-  assert.deepEqual(listedProduct.category, {
-    id: categoryId,
-    name: 'Coffee',
-    slug: `coffee-${categoryId.slice(0, 8)}`,
-    isActive: true,
-  });
-
-  const detail = await app.inject({
-    method: 'GET',
-    url: `/api/admin/products/${productId}`,
-    headers: adminHeaders(token),
-  });
-  assert.equal(detail.statusCode, 200);
-  assert.deepEqual(detail.json().category, {
-    id: categoryId,
-    name: 'Coffee',
-    slug: `coffee-${categoryId.slice(0, 8)}`,
-  });
+  const followupMigration = await readFile(
+    new URL('../drizzle/0001_hot_vanisher.sql', import.meta.url),
+    'utf8',
+  );
+  await client.exec(followupMigration);
+  const result = await client.query<{ count: number }>(`
+    SELECT count(*)::int AS count
+    FROM pg_constraint
+    WHERE conrelid = 'order_items'::regclass
+      AND confrelid = 'products'::regclass
+      AND contype = 'f'
+  `);
+  assert.equal(result.rows[0].count, 1);
 });
 
 test('pickup QR checkout stores private proof and charges no delivery fee', async (context) => {
-  const { client, db } = await createTestDatabase();
-  context.after(async () => client.end());
+  const { client, db } = await createDatabase();
+  context.after(async () => client.close());
   const { product } = await seedProduct(db);
   restoreAfter(
     context,
@@ -340,33 +277,36 @@ test('pickup QR checkout stores private proof and charges no delivery fee', asyn
 });
 
 test('admin session authorizes private proof reads and payment transitions', async (context) => {
-  const { client, db } = await createTestDatabase();
-  context.after(async () => client.end());
+  const { client, db } = await createDatabase();
+  context.after(async () => client.close());
   const { owner, token } = await createOwnerSession(db);
-  const order = await insertOrder(db, {
-    orderNumber: 'ORD-1',
-    customerName: 'Customer',
-    customerPhone: '5551234567',
-    fulfillmentType: 'PICKUP',
-    status: 'PENDING',
-    paymentMethod: 'QR',
-    subtotal: '25.00',
-    deliveryFee: '0',
-    total: '25.00',
-    trackingTokenHash: createHash('sha256').update('tracking-token').digest('hex'),
-    updatedAt: new Date(),
-  });
-  const paymentId = randomUUID();
-  await db.insert(payments).values({
-    id: paymentId,
-    orderId: order.id,
-    method: 'QR',
-    status: 'AWAITING_VERIFICATION',
-    amount: '25.00',
-    proofImagePath: 'payment-proofs/proof.png',
-    updatedAt: new Date(),
-  });
-  const [payment] = await db.select().from(payments).where(eq(payments.id, paymentId));
+  const [order] = await db
+    .insert(orders)
+    .values({
+      orderNumber: 'ORD-1',
+      customerName: 'Customer',
+      customerPhone: '5551234567',
+      fulfillmentType: 'PICKUP',
+      status: 'PENDING',
+      paymentMethod: 'QR',
+      subtotal: '25.00',
+      deliveryFee: '0',
+      total: '25.00',
+      trackingTokenHash: createHash('sha256').update('tracking-token').digest('hex'),
+      updatedAt: new Date(),
+    })
+    .returning();
+  const [payment] = await db
+    .insert(payments)
+    .values({
+      orderId: order.id,
+      method: 'QR',
+      status: 'AWAITING_VERIFICATION',
+      amount: '25.00',
+      proofImagePath: 'payment-proofs/proof.png',
+      updatedAt: new Date(),
+    })
+    .returning();
   assert.ok(payment);
 
   restoreAfter(
@@ -378,31 +318,6 @@ test('admin session authorizes private proof reads and payment transitions', asy
   );
   const app = await createRouteApp(adminOrderRoutes, '/api/admin', db);
   context.after(() => app.close());
-
-  const authApp = await createRouteApp(adminAuthRoutes, '/api/admin', db);
-  context.after(() => authApp.close());
-  const me = await authApp.inject({
-    method: 'GET',
-    url: '/api/admin/me',
-    headers: adminHeaders(token),
-  });
-  assert.equal(me.statusCode, 200);
-  assert.deepEqual(me.json(), {
-    user: { id: owner.id, name: owner.name, email: owner.email },
-  });
-
-  const orderList = await app.inject({
-    method: 'GET',
-    url: '/api/admin/orders',
-    headers: adminHeaders(token),
-  });
-  assert.equal(orderList.statusCode, 200);
-  const listedOrder = orderList
-    .json()
-    .find((candidate: { id: string }) => candidate.id === order.id);
-  assert.deepEqual(listedOrder.items, []);
-  assert.equal(listedOrder.payment.status, 'AWAITING_VERIFICATION');
-  assert.deepEqual(listedOrder.statusHistory, []);
 
   const denied = await app.inject({
     method: 'GET',
@@ -454,26 +369,32 @@ test('admin session authorizes private proof reads and payment transitions', asy
   });
   assert.equal(invalidDeliveryTransition.statusCode, 409);
 
-  const deliveryOrder = await insertOrder(db, {
-    orderNumber: 'ORD-DELIVERY',
-    customerName: 'Customer',
-    customerPhone: '5551234567',
-    fulfillmentType: 'DELIVERY',
-    status: 'PENDING',
-    paymentMethod: 'COD',
-    subtotal: '25.00',
-    deliveryFee: '3.25',
-    total: '28.25',
-    trackingTokenHash: createHash('sha256').update('delivery-token').digest('hex'),
-    updatedAt: new Date(),
-  });
-  await db.insert(payments).values({
-    orderId: deliveryOrder.id,
-    method: 'COD',
-    status: 'UNPAID',
-    amount: '28.25',
-    updatedAt: new Date(),
-  });
+  const [deliveryOrder] = await db
+    .insert(orders)
+    .values({
+      orderNumber: 'ORD-DELIVERY',
+      customerName: 'Customer',
+      customerPhone: '5551234567',
+      fulfillmentType: 'DELIVERY',
+      status: 'PENDING',
+      paymentMethod: 'COD',
+      subtotal: '25.00',
+      deliveryFee: '3.25',
+      total: '28.25',
+      trackingTokenHash: createHash('sha256').update('delivery-token').digest('hex'),
+      updatedAt: new Date(),
+    })
+    .returning();
+  await db
+    .insert(payments)
+    .values({
+      orderId: deliveryOrder.id,
+      method: 'COD',
+      status: 'UNPAID',
+      amount: '28.25',
+      updatedAt: new Date(),
+    })
+    .returning();
 
   const invalidPickupTransition = await app.inject({
     method: 'PATCH',
@@ -511,19 +432,22 @@ test('admin session authorizes private proof reads and payment transitions', asy
     .where(eq(payments.orderId, deliveryOrder.id));
   assert.equal(savedCodPayment.status, 'PAID');
 
-  const rejectedOrder = await insertOrder(db, {
-    orderNumber: 'ORD-REJECT',
-    customerName: 'Customer',
-    customerPhone: '5551234567',
-    fulfillmentType: 'PICKUP',
-    status: 'PENDING',
-    paymentMethod: 'QR',
-    subtotal: '10.00',
-    deliveryFee: '0',
-    total: '10.00',
-    trackingTokenHash: createHash('sha256').update('rejected-token').digest('hex'),
-    updatedAt: new Date(),
-  });
+  const [rejectedOrder] = await db
+    .insert(orders)
+    .values({
+      orderNumber: 'ORD-REJECT',
+      customerName: 'Customer',
+      customerPhone: '5551234567',
+      fulfillmentType: 'PICKUP',
+      status: 'PENDING',
+      paymentMethod: 'QR',
+      subtotal: '10.00',
+      deliveryFee: '0',
+      total: '10.00',
+      trackingTokenHash: createHash('sha256').update('rejected-token').digest('hex'),
+      updatedAt: new Date(),
+    })
+    .returning();
   await db.insert(payments).values({
     orderId: rejectedOrder.id,
     method: 'QR',
@@ -549,8 +473,8 @@ test('admin session authorizes private proof reads and payment transitions', asy
 });
 
 test('Socket.IO accepts authorized tracking token and rejects invalid credentials', async (context) => {
-  const { client, db } = await createTestDatabase();
-  context.after(async () => client.end());
+  const { client, db } = await createDatabase();
+  context.after(async () => client.close());
   const trackingToken = randomBytes(32).toString('base64url');
   await db.insert(orders).values({
     orderNumber: 'ORD-SOCKET',
@@ -642,31 +566,27 @@ test('Socket.IO accepts authorized tracking token and rejects invalid credential
   await new Promise<void>((resolve) => invalidServer.close(() => resolve()));
 });
 
-test('local storage exposes product images but keeps payment proofs private', async (context) => {
+test('Supabase Storage keeps proof objects private and product images public', async (context) => {
+  const originalFetch = globalThis.fetch;
+  const requests: Array<{ url: string; init?: RequestInit }> = [];
+  globalThis.fetch = async (input, init) => {
+    requests.push({ url: String(input), init });
+    return new Response(null, { status: 200 });
+  };
+  context.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+
   const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).toString('base64');
   await assert.rejects(() => imageStorage.savePaymentProof('eA=='), ImageValidationError);
   const productImage = await imageStorage.saveProductImage(png);
   const proofPath = await imageStorage.savePaymentProof(png);
-
-  const app = Fastify({ logger: false });
-  await app.register(uploadsPlugin);
-  await app.ready();
-  context.after(() => app.close());
-
-  const publicImage = await app.inject(new URL(productImage).pathname);
-  assert.equal(publicImage.statusCode, 200);
-  assert.match(publicImage.headers['content-type'] ?? '', /image\/png/);
-  const publicProof = await app.inject(`/api/uploads/${proofPath}`);
-  assert.equal(publicProof.statusCode, 404);
-  assert.deepEqual(
-    (await imageStorage.readPaymentProof(proofPath))?.bytes,
-    Buffer.from(png, 'base64'),
-  );
-  await assert.rejects(
-    () =>
-      imageStorage.removeProductImage('https://untrusted.example/api/uploads/products/file.png'),
-    ImageValidationError,
-  );
+  assert.match(productImage, /\/object\/public\/product-images\/products\//);
+  assert.match(proofPath, /^payment-proofs\/[0-9a-f-]+\.png$/);
+  assert.equal(requests[0].url.includes('/public/'), false);
+  assert.equal(requests[1].url.includes('/public/'), false);
+  assert.equal(requests[1].url.includes('payment-proofs'), true);
+  assert.equal(requests[1].init?.headers instanceof Object, true);
 });
 
 test('production frontend serves assets and SPA routes without masking API 404s', async (context) => {

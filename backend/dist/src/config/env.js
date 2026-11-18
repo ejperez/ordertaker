@@ -5,13 +5,12 @@ import { z } from 'zod';
 dotenv.config({ path: resolve(dirname(fileURLToPath(import.meta.url)), '../../../.env') });
 const envSchema = z
     .object({
-    DATABASE_URL: z.url({ protocol: /^mysql$/ }),
-    UPLOADS_DIR: z
-        .string()
-        .min(1)
-        .transform((directory) => resolve(directory))
-        .default(resolve(process.cwd(), 'uploads')),
-    API_PUBLIC_ORIGIN: z.url().optional(),
+    DATABASE_URL: z.url({ protocol: /^postgres(ql)?$/ }),
+    DIRECT_URL: z.url({ protocol: /^postgres(ql)?$/ }),
+    SUPABASE_URL: z.string(),
+    SUPABASE_SERVICE_ROLE_KEY: z.string().min(1),
+    SUPABASE_PRODUCT_BUCKET: z.string().default('product-images'),
+    SUPABASE_PAYMENT_PROOFS_BUCKET: z.string().default('payment-proofs'),
     API_HOST: z.string().default('0.0.0.0'),
     API_PORT: z.coerce
         .number()
@@ -22,6 +21,13 @@ const envSchema = z
     FRONTEND_ORIGIN: z.string().url().default('http://localhost:5173'),
 })
     .superRefine((config, context) => {
+    if (config.SUPABASE_PRODUCT_BUCKET === config.SUPABASE_PAYMENT_PROOFS_BUCKET) {
+        context.addIssue({
+            code: 'custom',
+            path: ['SUPABASE_PAYMENT_PROOFS_BUCKET'],
+            message: 'SUPABASE_PAYMENT_PROOFS_BUCKET must be separate from the public product bucket',
+        });
+    }
     if (process.env.NODE_ENV === 'production' &&
         new URL(config.FRONTEND_ORIGIN).protocol !== 'https:') {
         context.addIssue({
@@ -31,20 +37,12 @@ const envSchema = z
         });
     }
     if (process.env.NODE_ENV === 'production' &&
-        config.API_PUBLIC_ORIGIN &&
-        new URL(config.API_PUBLIC_ORIGIN).protocol !== 'https:') {
+        new URL(config.SUPABASE_URL).protocol !== 'https:') {
         context.addIssue({
             code: 'custom',
-            path: ['API_PUBLIC_ORIGIN'],
-            message: 'API_PUBLIC_ORIGIN must use HTTPS in production',
+            path: ['SUPABASE_URL'],
+            message: 'SUPABASE_URL must use HTTPS in production',
         });
     }
 });
-const config = envSchema.parse(process.env);
-export const env = {
-    ...config,
-    API_PUBLIC_ORIGIN: config.API_PUBLIC_ORIGIN ??
-        (process.env.NODE_ENV === 'production'
-            ? config.FRONTEND_ORIGIN
-            : `http://localhost:${config.API_PORT}`),
-};
+export const env = envSchema.parse(process.env);

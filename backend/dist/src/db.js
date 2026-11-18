@@ -1,5 +1,6 @@
-import { drizzle } from 'drizzle-orm/mysql2';
+import { drizzle } from 'drizzle-orm/postgres-js';
 import * as schema from './db/schema/index.js';
 export function createDatabase(client) {
-    return drizzle(client, { schema, mode: 'planetscale' });
+    // Workspaces resolve postgres.js through separate paths; runtime clients remain compatible.
+    return drizzle({ client: client, schema });
 }
